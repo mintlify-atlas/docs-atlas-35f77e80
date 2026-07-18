@@ -1,0 +1,224 @@
+---
+title: "8259 PIC and 8253 PIT: Interrupt Controller and Timer"
+sidebarTitle: "PIC & PIT"
+description: "How NKLegacy configures the 8259 Programmable Interrupt Controller and 8253 Programmable Interval Timer for IRQ remapping and a 1000 Hz system tick."
+---
+
+NKLegacy initializes two classic PC hardware components — the 8259 PIC for IRQ management and the 8253/8254 PIT for a 1000 Hz system timer — during the interrupt hardware phase of kernel boot (`kmain.c` Phase 3), immediately after the IDT is loaded. Both drivers must be initialized before `sti` is executed, otherwise unremapped IRQ vectors collide with CPU exception handlers and trigger spurious faults.
+
+---
+
+## 8259 Programmable Interrupt Controller
+
+Source: `ntoskrnl/driver/pic/pic.h` / `pic.c`
+
+### Why remapping is necessary
+
+The IBM PC BIOS maps the two 8259 PIC chips so that IRQ 0–7 fire interrupt vectors `0x08–0x0F` and IRQ 8–15 fire `0x70–0x77`. Vectors `0x00–0x1F` are reserved by the CPU for exceptions (divide-by-zero, general protection fault, page fault, etc.), so the BIOS mapping for the master PIC (`0x08–0x0F`) directly conflicts with CPU exceptions. NKLegacy remaps both PICs to safe vectors above `0x1F`:
+
+| IRQ Range | INT Vector Range | Decimal Range |
+|---|---|---|
+| IRQ 0–7 (master PIC) | `0x20–0x27` | 32–39 |
+| IRQ 8–15 (slave PIC) | `0x28–0x2F` | 40–47 |
+
+### Port Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `PIC1_CMD` | `0x20` | Master PIC command port |
+| `PIC1_DATA` | `0x21` | Master PIC data / IMR port |
+| `PIC2_CMD` | `0xA0` | Slave PIC command port |
+| `PIC2_DATA` | `0xA1` | Slave PIC data / IMR port |
+| `PIC_EOI` | `0x20` | End-Of-Interrupt command byte |
+
+### IRQ → Interrupt Vector Mapping
+
+| IRQ | INT Vector (hex) | INT Vector (dec) | Assigned to |
+|---|---|---|---|
+| IRQ 0 | `0x20` | 32 | PIT channel 0 tick (`pit_init`) |
+| IRQ 1 | `0x21` | 33 | PS/2 keyboard (`keyboard_init`) |
+| IRQ 2 | `0x22` | 34 | Cascade (slave PIC) |
+| IRQ 3 | `0x23` | 35 | COM2 |
+| IRQ 4 | `0x24` | 36 | COM1 |
+| IRQ 5 | `0x25` | 37 | LPT2 |
+| IRQ 6 | `0x26` | 38 | Floppy |
+| IRQ 7 | `0x27` | 39 | LPT1 |
+| IRQ 8 | `0x28` | 40 | RTC |
+| IRQ 9 | `0x29` | 41 | Free |
+| IRQ 10 | `0x2A` | 42 | Free |
+| IRQ 11 | `0x2B` | 43 | Free |
+| IRQ 12 | `0x2C` | 44 | PS/2 mouse |
+| IRQ 13 | `0x2D` | 45 | FPU |
+| IRQ 14 | `0x2E` | 46 | Primary ATA |
+| IRQ 15 | `0x2F` | 47 | Secondary ATA |
+
+### `void pic_init(void)`
+
+Saves the current IRQ masks, then programs both PICs using the standard ICW (Initialization Command Word) sequence:
+
+<Steps>
+  <Step title="Save existing masks">
+    Read `PIC1_DATA` and `PIC2_DATA` so they can be restored after re-initialization, preserving any IRQ masks set by the BIOS.
+  </Step>
+  <Step title="ICW1 — start cascade initialization">
+    Write `0x11` to both `PIC1_CMD` and `PIC2_CMD`. Bit 4 signals initialization; bit 0 requests ICW4.
+  </Step>
+  <Step title="ICW2 — set vector offsets">
+    Write `0x20` to `PIC1_DATA` (master base = 32) and `0x28` to `PIC2_DATA` (slave base = 40).
+  </Step>
+  <Step title="ICW3 — configure cascade wiring">
+    Write `0x04` to `PIC1_DATA` (slave attached on IRQ 2) and `0x02` to `PIC2_DATA` (slave cascade identity = 2).
+  </Step>
+  <Step title="ICW4 — set 8086 mode">
+    Write `0x01` to both data ports to enable 8086/88 mode (non-buffered, normal EOI).
+  </Step>
+  <Step title="Restore masks">
+    Write the saved mask bytes back to `PIC1_DATA` and `PIC2_DATA`.
+  </Step>
+</Steps>
+
+```c
+/* Called in kmain Phase 3, before pit_init / keyboard_init */
+serial_print(COM1, "NKLegacy: Initializing PIC...\n");
+pic_init();
+```
+
+---
+
+### `void pic_send_eoi(uint8_t irq)`
+
+Sends the End-Of-Interrupt command (`PIC_EOI` = `0x20`) to signal that the IRQ handler has finished. For IRQ ≥ 8 (slave PIC), the EOI is sent to `PIC2_CMD` first, then to `PIC1_CMD`. For IRQ < 8 (master PIC), only `PIC1_CMD` receives the EOI.
+
+**Every hardware IRQ handler must call `pic_send_eoi` before returning**, otherwise the PIC keeps the IRQ line masked and no further interrupts from that line will fire.
+
+```c
+static void my_irq_handler(registers_t *regs) {
+    (void)regs;
+    /* ... handle the interrupt ... */
+    pic_send_eoi(4);   /* IRQ4 = COM1 */
+}
+```
+
+---
+
+### `void pic_set_mask(uint8_t irq)`
+
+Masks (disables) the specified IRQ line by setting its bit in the Interrupt Mask Register of the appropriate PIC. IRQ 0–7 map to `PIC1_DATA`; IRQ 8–15 map to `PIC2_DATA` (with the IRQ number adjusted by subtracting 8).
+
+```c
+pic_set_mask(6);    /* disable floppy IRQ */
+```
+
+---
+
+### `void pic_clear_mask(uint8_t irq)`
+
+Unmasks (enables) the specified IRQ line by clearing its bit in the Interrupt Mask Register.
+
+```c
+pic_clear_mask(1);  /* enable PS/2 keyboard IRQ */
+```
+
+---
+
+## 8253/8254 Programmable Interval Timer
+
+Source: `ntoskrnl/driver/pit/pit.h` / `pit.c`
+
+The PIT provides a periodic interrupt source. NKLegacy programs channel 0 to fire IRQ 0 (INT `0x20`) at approximately 1000 Hz, giving a 1 ms system tick used by `pit_get_ticks()` and `pit_sleep_ms()`.
+
+### Frequency Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `PIT_FREQ` | `1193182` | Base oscillator frequency in Hz |
+| Divisor | `1193` (`PIT_FREQ / 1000`) | Programmed divisor for ~1000 Hz tick rate |
+
+### `void pit_init(void)`
+
+Programs PIT channel 0 and registers the tick callback on INT 32 (IRQ 0):
+
+<Steps>
+  <Step title="Calculate divisor">
+    `divisor = PIT_FREQ / 1000` = 1193. This gives a tick period of `1193182 / 1193 ≈ 1000.15 Hz`.
+  </Step>
+  <Step title="Write mode command">
+    Write `0x36` to `PIT_CMD` (`0x43`): channel 0, access mode lo/hi byte, mode 3 (square wave generator), binary counting.
+  </Step>
+  <Step title="Write divisor bytes">
+    Write the low byte of the divisor to `PIT_CHANNEL0` (`0x40`), then the high byte.
+  </Step>
+  <Step title="Register IRQ0 handler">
+    Call `idt_register_handler(32, pit_callback)` to hook the internal `pit_callback` onto INT 0x20. The callback increments the `tick_count` static variable on every interrupt.
+  </Step>
+</Steps>
+
+```c
+serial_print(COM1, "NKLegacy: Initializing PIT...\n");
+pit_init();
+```
+
+---
+
+### `uint32_t pit_get_ticks(void)`
+
+Returns the current value of the `tick_count` variable, which increments once per IRQ 0 interrupt (~every 1 ms). The tick counter starts at 0 when the kernel boots.
+
+```c
+uint32_t start = pit_get_ticks();
+/* ... do some work ... */
+uint32_t elapsed = pit_get_ticks() - start;
+kprintf("Operation took %u ms\n", elapsed);
+```
+
+`kmain.c` uses this immediately after initialization to report how long boot took:
+
+```c
+kprintf("NKLegacy kernel initialized. %u ticks elapsed.\n\n", pit_get_ticks());
+```
+
+---
+
+### `void pit_sleep_ms(uint32_t ms)`
+
+Adds `ms` to the current tick count to compute a target tick, then loops — executing `hlt` each iteration — until `tick_count` reaches the target. The `hlt` instruction halts the CPU until the next interrupt, so each iteration waits for the next PIT tick rather than spinning freely.
+
+```c
+pit_sleep_ms(500);   /* wait ~500 ms */
+```
+
+<Warning>
+  `pit_sleep_ms` blocks the entire CPU for the requested duration. NKLegacy has no scheduler, so no other work can proceed while the function is waiting. Do not call it from an interrupt handler. For long delays, consider restructuring logic to use `pit_get_ticks()` comparisons in the main loop instead.
+</Warning>
+
+## Usage Examples
+
+### Measuring time with `pit_get_ticks`
+
+```c
+#include "driver/pit/pit.h"
+#include "kernel/kprintf.h"
+
+void benchmark_something(void) {
+    uint32_t t0 = pit_get_ticks();
+
+    /* work to measure */
+    for (volatile int i = 0; i < 1000000; i++);
+
+    uint32_t t1 = pit_get_ticks();
+    kprintf("Loop took approximately %u ms\n", t1 - t0);
+}
+```
+
+### Simple delay
+
+```c
+#include "driver/pit/pit.h"
+#include "driver/vga/vga.h"
+
+void splash_screen(void) {
+    vga_print("Starting in 3 seconds...\n");
+    pit_sleep_ms(3000);
+    vga_clear();
+}
+```

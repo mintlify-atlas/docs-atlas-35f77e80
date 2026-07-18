@@ -1,0 +1,282 @@
+---
+title: "NKLegacy Shell: NT-Style Command Reference"
+sidebarTitle: "Commands"
+description: "Complete reference for all commands in NKLegacy's built-in NT-style shell: DIR, CD, MKDIR, ECHO, TYPE, CLS, VER, HELP, BUILD, and RUN."
+---
+
+NKLegacy includes an interactive command shell modeled after the Windows NT command prompt. It runs in an infinite loop after kernel initialization, accepting input from the PS/2 keyboard or the COM1 serial port. The shell entry point is `cmd_run()`, declared in `ntoskrnl/exe/cmd.h` and implemented in `ntoskrnl/exe/cmd.c`.
+
+## Shell Prompt
+
+The prompt is printed before each input line and reflects the current working directory:
+
+| State                        | Prompt displayed    | Color attribute |
+|------------------------------|---------------------|-----------------|
+| Root directory (`C:`)        | `C:\>`              | `0x07` (light gray) |
+| Subdirectory (e.g. `docs`)   | `C:\docs>`          | `0x07` (light gray) |
+| NKBuild mode                 | `nkbuild> `         | `0x0C` (light red)  |
+
+The current working directory is tracked internally in a 128-character `cwd_path` buffer, initialized to `"C:"`.
+
+## Input Handling
+
+<Steps>
+  <Step title="Poll for a character">
+    `keyboard_getchar()` is called first. If it returns `0` (no key ready), `serial_getchar(COM1)` is tried. If both return `0`, the loop yields with `pause`.
+  </Step>
+  <Step title="Accumulate into buffer">
+    Printable characters are appended to a 128-character `cmd_buf`. The buffer silently drops any character past index 127.
+  </Step>
+  <Step title="Handle backspace">
+    A `\b` character decrements the buffer index and erases the last character on-screen (backspace + space + backspace sequence).
+  </Step>
+  <Step title="Submit on Enter">
+    `\n` or `\r` null-terminates `cmd_buf` and dispatches it to the command executor (or NKBuild processor, if in build mode).
+  </Step>
+</Steps>
+
+<Note>
+  The shell is **case-sensitive**: all built-in commands must be entered in lowercase (e.g., `dir`, `cls`, `mkdir`). Entering `DIR` or `CLS` will produce an "is not recognized" error.
+</Note>
+
+---
+
+## Commands
+
+### `help`
+
+Lists all available built-in commands with a short description.
+
+```text
+C:\> help
+CD             Displays the name of or changes the current directory.
+CLS            Clears the screen.
+DIR            Displays a list of files and subdirectories in a directory.
+ECHO           Displays messages or directs output to files.
+MKDIR          Creates a directory.
+TYPE           Displays the contents of a text file.
+VER            Displays the Windows version.
+BUILD          Starts the NKBuild minimal PE builder.
+RUN            Executes the built PE binary.
+```
+
+---
+
+### `cls`
+
+Clears the VGA text-mode screen and resets the hardware cursor to position (0, 0).
+
+```text
+C:\> cls
+```
+
+Internally calls `vga_clear()` followed by `vga_set_cursor(0, 0)`.
+
+---
+
+### `ver`
+
+Displays the OS version string.
+
+```text
+C:\> ver
+
+Microsoft Windows [Version NKLegacy]
+```
+
+---
+
+### `dir`
+
+Lists all files and subdirectories in the current working directory. Each entry is printed with its type tag (`<DIR>` or blank), name, and size. For directories, size reflects the number of direct children; for files, it is the byte count.
+
+**Syntax**
+
+```text
+dir
+```
+
+**Example**
+
+```text
+C:\> dir
+
+ Directory of C:
+
+<DIR>   docs    2
+        hello.txt  13
+               2 File(s)
+```
+
+Iterates `cwd_node->first_child` through the sibling chain via `next_sibling`.
+
+---
+
+### `cd`
+
+Changes the current working directory. Use `..` to navigate up one level.
+
+**Syntax**
+
+```text
+cd <dirname>
+cd ..
+```
+
+**Example**
+
+```text
+C:\> cd docs
+C:\docs> cd ..
+C:\>
+```
+
+<Steps>
+  <Step title="cd ..">
+    Walks `cwd_node` to its `parent` pointer and strips the last path component from `cwd_path`. If the path would become empty, it resets to `"C:"`.
+  </Step>
+  <Step title="cd &lt;name&gt;">
+    Calls `nkfs_find_child(cwd_node, name)`. If the returned node exists and is a directory, `cwd_node` and `cwd_path` are updated. Otherwise prints the error below.
+  </Step>
+</Steps>
+
+**Error:** `The system cannot find the path specified.`
+
+---
+
+### `mkdir` / `md`
+
+Creates a new subdirectory inside the current directory. Both `mkdir <name>` and `md <name>` are accepted.
+
+**Syntax**
+
+```text
+mkdir <name>
+md <name>
+```
+
+**Example**
+
+```text
+C:\> mkdir projects
+C:\> md src
+```
+
+Calls `nkfs_mkdir(cwd_node, name)`. If the directory already exists (or the node pool is full), prints:
+
+```text
+A subdirectory or file <name> already exists.
+```
+
+---
+
+### `echo`
+
+Prints text to the VGA console. Supports output redirection to a file using `>`. When called with no argument, prints `ECHO is on.`
+
+**Syntax**
+
+```text
+echo [text]
+echo <text> > <filename>
+```
+
+**Examples**
+
+```text
+C:\> echo Hello World
+Hello World
+
+C:\> echo Hello > greeting.txt
+
+C:\> echo
+ECHO is on.
+```
+
+When `>` is present in the argument string, the text to the left of `>` is written into the named file in the current directory via `nkfs_create_file` + `nkfs_write_file`. Trailing spaces are stripped from the text before writing.
+
+**Error (file creation failed):** `Access denied.`
+
+---
+
+### `type`
+
+Displays the raw byte contents of a file in the current directory to both the VGA screen and COM1.
+
+**Syntax**
+
+```text
+type <filename>
+```
+
+**Example**
+
+```text
+C:\> type greeting.txt
+Hello
+```
+
+Iterates over `file->data[0..file->size-1]`, calling `vga_putchar` and `serial_putchar(COM1, ...)` for each byte. Newlines (`\n`) are followed by a carriage return (`\r`) on the serial port.
+
+**Error:** `The system cannot find the file specified.`
+
+---
+
+### `build`
+
+Enters NKBuild mode to interactively construct a minimal PE32 binary in memory. The shell prompt changes to `nkbuild> ` (light red) and each input line is forwarded to `nkbuild_process_line()`. Type `done` to finalize the binary and return to the normal shell prompt.
+
+See [NKBuild](/shell/nkbuild) for the full directive reference and workflow.
+
+```text
+C:\> build
+NKBuild: New minimal PE build started.
+NKBuild: Type 'done' to finish linking.
+nkbuild> mov eax, 42
+nkbuild> ret
+nkbuild> done
+NKBuild: Linked successfully. Size = 513 bytes.
+C:\>
+```
+
+---
+
+### `run`
+
+Executes the PE32 binary most recently assembled with `build`. Retrieves the buffer from `nkbuild_get_exe_buffer()` and its size from `nkbuild_get_exe_size()`, then passes them to `pe_load_and_run()`.
+
+**Syntax**
+
+```text
+run
+```
+
+**Example**
+
+```text
+C:\> run
+PE: Loading 1 sections to ImageBase 0x1000000...
+PE: Jmp to EntryPoint: 0x1001000
+PE: Application exited.
+```
+
+If no binary has been built yet:
+
+```text
+No executable built yet. Run 'build' first.
+```
+
+See [PE Loader](/shell/pe-loader) for details on how the binary is validated and executed.
+
+---
+
+## Error Messages
+
+| Message | Trigger |
+|---------|---------|
+| `'<cmd>' is not recognized as an internal or external command, operable program or batch file.` | The input does not match any built-in command. |
+| `The system cannot find the path specified.` | `cd <name>` — target does not exist or is not a directory. |
+| `The system cannot find the file specified.` | `type <file>` — target does not exist or is a directory. |
+| `A subdirectory or file <name> already exists.` | `mkdir` / `md` — a node with that name already exists. |
+| `Access denied.` | `echo ... >` — `nkfs_create_file` returned `NULL` (pool full or type collision). |
+| `No executable built yet. Run 'build' first.` | `run` — no binary has been finalized by NKBuild. |

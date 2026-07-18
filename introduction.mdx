@@ -1,0 +1,74 @@
+---
+title: "NKLegacy: A Windows NT-inspired x86 OS Kernel"
+sidebarTitle: "Introduction"
+description: "NKLegacy is a bare-metal x86 kernel built from scratch in C and assembly, inspired by Windows NT, with a custom bootloader, hardware drivers, and an interactive shell."
+---
+
+NKLegacy is a bare-metal x86 (i386) operating system kernel written from scratch in C and x86 assembly, drawing direct inspiration from the architecture of Windows NT. The project demonstrates every layer of a real kernel — from a hand-written two-stage bootloader that transitions the CPU from real mode to 32-bit protected mode, through CPU descriptor tables, hardware interrupt handling, and device drivers, all the way up to an NT-style interactive shell backed by an in-memory filesystem. Whether you are studying OS internals, building your own kernel, or simply curious how the machine boots and runs, NKLegacy provides a compact and fully readable reference implementation, versioned at **v0.1.0** (codename **"Legacy"**).
+
+## What NKLegacy includes
+
+NKLegacy ships as a cohesive collection of modules, each targeting a specific layer of the system stack.
+
+### NKBootman — Custom Two-Stage Bootloader
+
+The native boot path uses **NKBootman**, a hand-written bootloader stored in two NASM assembly stages. Stage 1 (`boot/stage1/mbr.asm`) fits entirely in the 512-byte MBR and loads Stage 2 from the floppy image. Stage 2 (`boot/stage2/stage2.asm`) sets up a minimal protected-mode environment and hands control to the kernel binary. For easier development and testing, the kernel also supports **Multiboot/GRUB**: the `boot.asm` Multiboot entry point allows GRUB to load `nklegacy.elf` directly, which is the recommended path when iterating quickly.
+
+### GDT and IDT
+
+`ntoskrnl/arch/i386/gdt.c` sets up a flat 32-bit Global Descriptor Table (kernel code, kernel data, and null segments) and loads it with `lgdt`. `ntoskrnl/arch/i386/idt.c` populates the Interrupt Descriptor Table with 256 gate entries, backed by assembly ISR and IRQ stubs in `isr.asm`. Port I/O (`inb`, `outb`, `inw`, `outw`, `io_wait`) is exposed as inline functions in `io.h`.
+
+### Hardware Drivers
+
+Five hardware drivers live under `ntoskrnl/driver/`:
+
+| Driver | Location | Description |
+|--------|----------|-------------|
+| VGA Text Mode | `driver/vga/` | 80×25 console with 16-colour support and hardware cursor |
+| Serial Debug | `driver/serial/` | COM1 at 115200 baud, mirroring all VGA output for QEMU `-serial stdio` |
+| 8259 PIC | `driver/pic/` | Remapped Programmable Interrupt Controller (IRQs 0–15 → vectors 32–47) |
+| 8253 PIT | `driver/pit/` | Programmable Interval Timer configured to fire at 1000 Hz |
+| PS/2 Keyboard | `driver/keyboard/` | Scancode set 1 decoder with Shift key support |
+
+### kprintf
+
+`ntoskrnl/kernel/kprintf.c` provides a freestanding formatted-output function that writes simultaneously to the VGA framebuffer and the COM1 serial port. It is the primary logging primitive used throughout the kernel.
+
+### NKFS — RAM Filesystem
+
+`ntoskrnl/fs/nkfs/` implements a simple in-memory hierarchical filesystem. Nodes are either files (`NKFS_FILE`) or directories (`NKFS_DIR`) linked in a tree structure. The shell uses NKFS to provide `dir`, `cd`, `mkdir`, and `type` commands backed by real filesystem state.
+
+### NT-Style Shell
+
+`ntoskrnl/exe/cmd.c` runs an interactive command loop (`cmd_run()`) presenting a familiar `C:\>` prompt. Supported commands include `dir`, `cd`, `mkdir`, `type`, `cls`, `ver`, `echo`, `help`, `build`, and `run`.
+
+### NKBuild PE Builder
+
+`ntoskrnl/exe/nkbuild.c` and `ntoskrnl/exe/pe.c` provide a minimal Portable Executable (PE) builder and parser/loader, accessible from the shell via the `build` and `run` commands.
+
+## Explore the documentation
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build the kernel and boot it in QEMU in under five minutes.
+  </Card>
+  <Card title="Architecture Overview" icon="sitemap" href="/architecture/overview">
+    Understand the boot sequence, memory map, and module boundaries.
+  </Card>
+  <Card title="GDT & IDT" icon="microchip" href="/kernel/gdt-idt">
+    How NKLegacy sets up protected-mode descriptor tables and interrupt handling.
+  </Card>
+  <Card title="VGA Driver" icon="display" href="/drivers/vga">
+    The 80×25 colour text-mode console and hardware cursor implementation.
+  </Card>
+  <Card title="NKFS Filesystem" icon="folder-open" href="/fs/nkfs">
+    The in-memory hierarchical RAM filesystem used by the shell.
+  </Card>
+  <Card title="Shell Commands" icon="terminal" href="/shell/commands">
+    Full reference for every command supported by the NT-style shell.
+  </Card>
+</CardGroup>
+
+<Note>
+  NKLegacy targets the **x86 (i386)** architecture only and is released under the **MIT License**. See the `LICENSE` file in the repository root for the full text.
+</Note>

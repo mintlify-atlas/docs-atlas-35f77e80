@@ -1,0 +1,120 @@
+{
+  "projectType": "general",
+  "projectName": "NKLegacy",
+  "projectDescription": "A Windows NT-inspired kernel operating system for x86 (i386), written from scratch in C and x86 assembly, featuring a two-stage bootloader, protected mode, hardware drivers, a RAM filesystem, and a built-in command shell.",
+  "theme": "aspen",
+  "primaryColor": "#1B6EEA",
+  "lightColor": "#3B8FFF",
+  "darkColor": "#0D3E8A",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "project-structure"
+            ]
+          },
+          {
+            "group": "Architecture",
+            "pages": [
+              "architecture/overview",
+              "architecture/bootloader",
+              "architecture/kernel-init",
+              "architecture/memory-layout"
+            ]
+          },
+          {
+            "group": "Kernel Subsystems",
+            "pages": [
+              "kernel/gdt-idt",
+              "kernel/interrupts",
+              "kernel/kprintf",
+              "kernel/panic-bsod"
+            ]
+          },
+          {
+            "group": "Drivers",
+            "pages": [
+              "drivers/vga",
+              "drivers/serial",
+              "drivers/pic-pit",
+              "drivers/keyboard"
+            ]
+          },
+          {
+            "group": "Filesystem & Shell",
+            "pages": [
+              "fs/nkfs",
+              "shell/commands",
+              "shell/nkbuild",
+              "shell/pe-loader"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Two-stage NKBootman bootloader (MBR → Protected Mode) and GRUB/Multiboot support",
+    "Full x86 protected mode with GDT and IDT setup",
+    "ISR/IRQ handling via 8259 PIC remapping",
+    "8253/8254 PIT configured to 1000 Hz for system tick counting",
+    "VGA text-mode driver (80×25, colors, hardware cursor, scrolling)",
+    "COM1 serial debug output at 115200 baud",
+    "PS/2 keyboard driver with scancode set 1 and shift support",
+    "kprintf kernel formatter outputting to both VGA and serial simultaneously",
+    "NKFS in-memory RAM filesystem with directory tree and file I/O",
+    "Built-in NT-style command shell (DIR, CD, MKDIR, ECHO, TYPE, CLS, VER)",
+    "NKBuild minimal PE binary builder and PE loader/executor",
+    "Freestanding runtime string library (memset, memcpy, strlen, strcmp, etc.)"
+  ],
+  "publicApiSurface": [
+    "gdt_init()",
+    "idt_init()",
+    "idt_register_handler(uint8_t n, isr_handler_t handler)",
+    "vga_clear()",
+    "vga_putchar(char c)",
+    "vga_print(const char *str)",
+    "vga_set_color(uint8_t c)",
+    "vga_set_cursor(size_t x, size_t y)",
+    "vga_update_cursor()",
+    "serial_init(uint16_t port)",
+    "serial_putchar(uint16_t port, char c)",
+    "serial_print(uint16_t port, const char *str)",
+    "serial_getchar(uint16_t port)",
+    "pic_init()",
+    "pic_send_eoi(uint8_t irq)",
+    "pic_set_mask(uint8_t irq)",
+    "pic_clear_mask(uint8_t irq)",
+    "pit_init()",
+    "pit_get_ticks()",
+    "pit_sleep_ms(uint32_t ms)",
+    "keyboard_init()",
+    "keyboard_getchar()",
+    "kprintf(const char *fmt, ...)",
+    "kernel_panic(const char *msg)",
+    "bsod(const char *message)",
+    "nkfs_init()",
+    "nkfs_get_root()",
+    "nkfs_find_child(nkfs_node_t *parent, const char *name)",
+    "nkfs_mkdir(nkfs_node_t *parent, const char *name)",
+    "nkfs_create_file(nkfs_node_t *parent, const char *name)",
+    "nkfs_write_file(nkfs_node_t *file, const char *data, uint32_t size)",
+    "pe_load_and_run(void *file_buffer, uint32_t file_size)",
+    "nkbuild_start()",
+    "nkbuild_process_line(const char *line)",
+    "nkbuild_get_exe_size()",
+    "nkbuild_get_exe_buffer()",
+    "cmd_run()",
+    "outb(uint16_t port, uint8_t val)",
+    "inb(uint16_t port)",
+    "outw(uint16_t port, uint16_t val)",
+    "inw(uint16_t port)",
+    "io_wait()"
+  ]
+}

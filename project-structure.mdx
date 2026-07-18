@@ -1,0 +1,280 @@
+---
+title: "NKLegacy Source Tree and Module Layout"
+sidebarTitle: "Project Structure"
+description: "A guide to every directory and source file in NKLegacy, explaining what each module does and how the components fit together."
+---
+
+NKLegacy is organised as a single repository whose two top-level concerns — the **NKBootman bootloader** and the **ntoskrnl kernel** — live in cleanly separated directories. A single `Makefile` at the root ties everything together, driving the NASM assembler, the GCC C compiler in freestanding mode, and the GNU linker to produce either a GRUB-bootable ELF image or a raw floppy disk image. All build output lands under `build/` and is never committed to the repository.
+
+## Annotated directory tree
+
+```text
+NKLegacy/
+├── boot/                    # NKBootman bootloader
+│   ├── stage1/mbr.asm       #   Stage 1: MBR (512 bytes)
+│   └── stage2/stage2.asm    #   Stage 2: Protected mode setup
+├── include/nk/              # Shared headers
+│   ├── types.h
+│   └── string.h
+├── ntoskrnl/                # Kernel (ntoskrnl)
+│   ├── arch/i386/           #   Architecture-specific
+│   │   ├── boot.asm         #     Multiboot entry point
+│   │   ├── gdt.c/h          #     Global Descriptor Table
+│   │   ├── idt.c/h          #     Interrupt Descriptor Table
+│   │   ├── isr.asm          #     ISR/IRQ assembly stubs
+│   │   └── io.h             #     Port I/O helpers
+│   ├── driver/              #   Hardware drivers
+│   │   ├── vga/             #     VGA text mode
+│   │   ├── serial/          #     COM1 serial debug
+│   │   ├── pic/             #     8259 PIC
+│   │   ├── pit/             #     8253/8254 PIT timer
+│   │   └── keyboard/        #     PS/2 keyboard
+│   ├── kernel/              #   Kernel core
+│   │   ├── kmain.c          #     Entry point & init
+│   │   ├── kprintf.c/h      #     Formatted output
+│   │   ├── bsod.c/h         #     Blue Screen of Death
+│   │   └── panic.c/h        #     Kernel panic handler
+│   ├── lib/                 #   Runtime library
+│   │   └── string.c         #     memset, memcpy, strlen, etc.
+│   ├── exe/                 #   Executable support
+│   │   ├── pe.c/h           #     PE parser/loader
+│   │   ├── nkbuild.c/h      #     PE builder
+│   │   └── cmd.c/h          #     NT-style shell
+│   ├── fs/nkfs/             #   NKFS RAM filesystem
+│   │   ├── nkfs.c
+│   │   └── nkfs.h
+│   └── linker.ld            #   Kernel linker script
+├── Makefile                 # Master build system
+└── LICENSE                  # MIT License
+```
+
+## Module-by-module walkthrough
+
+### `boot/` — NKBootman two-stage bootloader
+
+<Accordion title="boot/stage1/mbr.asm — Stage 1 MBR">
+  The MBR is the very first code the BIOS executes after power-on. It must fit within exactly 512 bytes (including the `0x55AA` boot signature at bytes 510–511). Its sole job is to be loaded by the BIOS at physical address `0x7C00`, locate Stage 2 on the floppy, and transfer control to it. The NASM source is assembled with `-f bin` to produce a flat binary (`build/boot/mbr.bin`) that is written directly to sector 0 of the disk image by the `Makefile`.
+</Accordion>
+
+<Accordion title="boot/stage2/stage2.asm — Stage 2 protected-mode setup">
+  Stage 2 occupies sectors 1–16 of the floppy image and is responsible for the real-mode-to-protected-mode transition. It sets up a minimal GDT, enables the PE bit in CR0, performs a far jump to flush the instruction pipeline, then loads the kernel binary (present from sector 17 onward) into memory at `0x100000` and jumps to it. Like Stage 1, it is assembled as a flat binary (`build/boot/stage2.bin`).
+</Accordion>
+
+---
+
+### `include/nk/` — Shared kernel headers
+
+These headers are included by both the bootloader and the kernel via `-I$(ROOT)/include` in `CFLAGS`.
+
+<Accordion title="include/nk/types.h — Fundamental type definitions">
+  Pulls in `<stdint.h>`, `<stddef.h>`, and `<stdbool.h>` from GCC's own freestanding include directory (located at build time via `gcc -m32 -print-file-name=include`). Defines two architecture-specific address types and overrides `NULL`:
+
+  ```c
+  typedef uint32_t phys_addr_t;
+  typedef uint32_t virt_addr_t;
+
+  #define NULL ((void *)0)
+  ```
+</Accordion>
+
+<Accordion title="include/nk/string.h — Freestanding string function declarations">
+  Declares the full set of string and memory primitives implemented in `ntoskrnl/lib/string.c`. Because the kernel is compiled with `-nostdinc`, the standard `<string.h>` is not available; this header provides equivalent declarations:
+
+  ```c
+  void  *memset (void *dest, int val, size_t count);
+  void  *memcpy (void *dest, const void *src, size_t count);
+  void  *memmove(void *dest, const void *src, size_t count);
+  int    memcmp (const void *a, const void *b, size_t count);
+  size_t strlen (const char *str);
+  int    strcmp (const char *a, const char *b);
+  int    strncmp(const char *a, const char *b, size_t n);
+  char  *strcpy (char *dest, const char *src);
+  char  *strncpy(char *dest, const char *src, size_t n);
+  char  *strcat (char *dest, const char *src);
+  ```
+</Accordion>
+
+---
+
+### `ntoskrnl/arch/i386/` — Architecture layer
+
+This directory contains everything that is specific to the x86 (i386) CPU and must be written in assembly or be tightly coupled to hardware registers.
+
+<Accordion title="boot.asm — Multiboot entry point">
+  Defines the Multiboot 1 header magic and flags so that GRUB can recognise the ELF and load it. Provides the `_start` symbol (referenced in `linker.ld`) which sets up an initial stack and calls `kmain(magic, mboot_info)`. Assembled by NASM with `-f elf32`.
+</Accordion>
+
+<Accordion title="gdt.c / gdt.h — Global Descriptor Table">
+  `gdt_init()` populates a static array of segment descriptors (null, kernel code, kernel data) and calls the inline `lgdt` wrapper to load the GDTR. After `gdt_init()` returns, all subsequent memory accesses use the flat 32-bit segments established here.
+</Accordion>
+
+<Accordion title="idt.c / idt.h — Interrupt Descriptor Table">
+  `idt_init()` fills all 256 IDT entries with interrupt gate descriptors pointing at the ISR stubs defined in `isr.asm`, then calls `lidt` to load the IDTR. Entries 0–31 cover CPU exceptions; entries 32–47 are remapped hardware IRQs.
+</Accordion>
+
+<Accordion title="isr.asm — ISR/IRQ assembly stubs">
+  Provides the low-level assembly entry points for all exception and IRQ handlers. Each stub saves the full register state, pushes a vector number, and calls the appropriate C handler. Assembled with `-f elf32` and linked into the kernel ELF.
+</Accordion>
+
+<Accordion title="io.h — Port I/O inline helpers">
+  A header-only collection of `static inline` wrappers around x86 port I/O instructions:
+
+  ```c
+  void     outb(uint16_t port, uint8_t val);
+  uint8_t  inb (uint16_t port);
+  void     outw(uint16_t port, uint16_t val);
+  uint16_t inw (uint16_t port);
+  void     io_wait(void);   /* writes to port 0x80 for ~1–4 µs delay */
+  ```
+
+  All five functions are used extensively by the PIC, PIT, serial, and keyboard drivers.
+</Accordion>
+
+---
+
+### `ntoskrnl/driver/` — Hardware drivers
+
+Each driver lives in its own subdirectory and exposes a minimal public API.
+
+| Directory | Hardware | Key details |
+|-----------|----------|-------------|
+| `driver/vga/` | VGA text mode | 80×25 framebuffer at `0xB8000`, 16-colour attributes, hardware cursor via CRT index registers |
+| `driver/serial/` | COM1 UART | Initialised to 115200 baud; `serial_init(COM1)` is called first in `kmain` to capture all early debug output |
+| `driver/pic/` | 8259A PIC | Remaps master PIC to IRQ vectors 32–39 and slave to 40–47, clearing the default BIOS mapping that conflicts with CPU exceptions |
+| `driver/pit/` | 8253/8254 PIT | Configured in mode 3 (square wave) to produce 1000 Hz interrupts; `pit_get_ticks()` returns a running tick counter |
+| `driver/keyboard/` | PS/2 keyboard | Reads scancode set 1 from port `0x60` on IRQ 1; decodes scancodes to ASCII with Shift modifier support |
+
+---
+
+### `ntoskrnl/kernel/` — Kernel core
+
+<Accordion title="kmain.c — Boot sequence and entry point">
+  `kmain(uint32_t magic, void *mboot_info)` is the C entry point called from `boot.asm`. It runs the kernel through five distinct phases:
+
+  1. **Phase 1 — Early hardware init**: `serial_init(COM1)` then `vga_clear()`.
+  2. **Phase 2 — CPU tables**: `gdt_init()` then `idt_init()`.
+  3. **Phase 3 — Interrupt hardware**: `pic_init()`, `pit_init()`, `keyboard_init()`, then `sti`.
+  4. **Phase 4 — Boot banner**: Prints the NT-style `[OK]` status lines to the VGA console using colour attributes (light cyan for the banner, light green for `[OK]`, white for descriptions).
+  5. **Phase 5 — Shell loop**: `nkfs_init()` followed by `cmd_run()`, which does not return.
+</Accordion>
+
+<Accordion title="kprintf.c / kprintf.h — Formatted kernel output">
+  `kprintf(const char *fmt, ...)` is a `printf`-style formatter that writes simultaneously to the VGA framebuffer and COM1. It is the primary output primitive used throughout the kernel and drivers.
+</Accordion>
+
+<Accordion title="bsod.c / bsod.h — Blue Screen of Death">
+  Implements the NT-style blue-screen halt displayed on unrecoverable hardware or software errors. Sets the VGA colour to blue-on-white, prints the stop code and message, and halts the CPU.
+</Accordion>
+
+<Accordion title="panic.c / panic.h — Kernel panic handler">
+  `panic()` is called from exception handlers and assertion failures. It prints the panic message via `kprintf`, optionally invokes the BSOD display, disables interrupts, and halts.
+</Accordion>
+
+---
+
+### `ntoskrnl/lib/` — Freestanding runtime library
+
+`lib/string.c` provides all ten functions declared in `include/nk/string.h`. The implementations are straightforward byte-by-byte loops — intentionally simple so the code is easy to audit:
+
+```c
+// Excerpt: memmove handles overlapping regions correctly
+void *memmove(void *dest, const void *src, size_t count) {
+    unsigned char *d = (unsigned char *)dest;
+    const unsigned char *s = (const unsigned char *)src;
+    if (d < s) {
+        while (count--) *d++ = *s++;
+    } else {
+        d += count; s += count;
+        while (count--) *--d = *--s;
+    }
+    return dest;
+}
+```
+
+---
+
+### `ntoskrnl/exe/` — Executable support and shell
+
+<Accordion title="pe.c / pe.h — PE parser and loader">
+  Implements a minimal Portable Executable parser that can read PE headers and locate sections within a binary blob. Used by the `run` shell command to execute a PE binary built by NKBuild.
+</Accordion>
+
+<Accordion title="nkbuild.c / nkbuild.h — PE builder">
+  Provides the `build` shell command. Takes source input from the user and produces a valid PE binary stored in the NKFS filesystem, which can then be loaded and executed with `run`.
+</Accordion>
+
+<Accordion title="cmd.c / cmd.h — NT-style interactive shell">
+  `cmd_run()` implements the main shell loop. It reads characters from the PS/2 keyboard driver, echoes them to the VGA console, and dispatches completed lines to `cmd_execute()`. The shell maintains a current working directory pointer into the NKFS tree and a `cwd_path` string (e.g. `C:\docs`) to display in the prompt.
+
+  Supported commands: `help`, `cls`, `ver`, `dir`, `cd`, `mkdir` (`md`), `type`, `echo`, `build`, `run`.
+</Accordion>
+
+---
+
+### `ntoskrnl/fs/nkfs/` — NKFS RAM filesystem
+
+NKFS is a purely in-memory hierarchical filesystem. Each node is a `nkfs_node_t` struct:
+
+```c
+typedef struct nkfs_node {
+    char name[32];
+    uint8_t  type;          /* NKFS_FILE (0) or NKFS_DIR (1) */
+    uint32_t size;
+    uint8_t *data;
+
+    struct nkfs_node *parent;
+    struct nkfs_node *first_child;
+    struct nkfs_node *next_sibling;
+} nkfs_node_t;
+```
+
+The public API exposed by `nkfs.h`:
+
+```c
+void          nkfs_init(void);
+nkfs_node_t  *nkfs_get_root(void);
+nkfs_node_t  *nkfs_find_child(nkfs_node_t *parent, const char *name);
+nkfs_node_t  *nkfs_mkdir(nkfs_node_t *parent, const char *name);
+nkfs_node_t  *nkfs_create_file(nkfs_node_t *parent, const char *name);
+int           nkfs_write_file(nkfs_node_t *file, const char *data, uint32_t size);
+```
+
+`nkfs_init()` is called from `kmain` just before `cmd_run()` and sets up the root node of the filesystem tree.
+
+---
+
+### `ntoskrnl/linker.ld` — Kernel linker script
+
+The linker script places the kernel at physical address `0x100000` (1 MB), where both the NKBootman Stage 2 and the Multiboot protocol expect to find it. It defines `_kernel_start`, aligns the `.multiboot` section to a 4-byte boundary (within the first 8 KB so GRUB can find the magic), and aligns `.text` to a 4 KB page boundary.
+
+```asm
+ENTRY(_start)
+
+SECTIONS {
+    . = 0x100000;
+    _kernel_start = .;
+
+    .multiboot ALIGN(4)  : { *(.multiboot) }
+    .text      ALIGN(4K) : { *(.text)      }
+    /* ... */
+}
+```
+
+---
+
+### `Makefile` — Master build system
+
+The Makefile defines four phony top-level targets and handles all dependency tracking:
+
+| Target | Description |
+|--------|-------------|
+| `make all` | Builds kernel ELF + NKBootman binaries + floppy image |
+| `make iso` | Builds the GRUB rescue ISO (`build/nklegacy.iso`) |
+| `make run` | Builds ISO then launches `qemu-system-i386` with `-serial stdio` |
+| `make run-bootman` | Builds floppy image then boots it in QEMU via `-fda` |
+| `make run-serial` | Builds ISO then launches QEMU headless (`-display none -no-reboot`) |
+| `make clean` | Removes the entire `build/` directory |
+
+<Note>
+  All kernel C sources are compiled freestanding: `CFLAGS` includes `-ffreestanding -fno-builtin -fno-stack-protector -nostdlib -nostdinc` along with strict warning flags `-Wall -Wextra -Werror`. GCC's own built-in headers (`stdint.h`, `stdarg.h`, `stddef.h`, `stdbool.h`) are still available via `-isystem $(GCC_INCDIR)` where `GCC_INCDIR` is resolved at build time with `gcc -m32 -print-file-name=include`. No host libc is linked.
+</Note>

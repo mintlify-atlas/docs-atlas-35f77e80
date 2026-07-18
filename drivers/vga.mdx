@@ -1,0 +1,178 @@
+---
+title: "VGA Text Mode Driver: 80×25 Console Output"
+sidebarTitle: "VGA"
+description: "Reference for NKLegacy's VGA text-mode driver: console initialization, character output, color attributes, hardware cursor control, and screen scrolling."
+---
+
+NKLegacy's VGA driver targets the classic 80×25 text mode backed by the VGA frame buffer at physical address `0xB8000`. It supports colored text, hardware cursor positioning via the CRTC register pair, and automatic scrolling when output reaches the bottom of the screen.
+
+## Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `VGA_WIDTH` | `80` | Number of character columns |
+| `VGA_HEIGHT` | `25` | Number of character rows |
+| `VGA_MEMORY` | `0xB8000` | Physical base address of the VGA text frame buffer |
+
+Each cell in the frame buffer is a 16-bit value: the low byte holds the ASCII character code and the high byte holds the color attribute.
+
+## API Reference
+
+### `void vga_clear(void)`
+
+Fills the entire 80×25 screen with space characters using the current color attribute, then resets the hardware cursor to column 0, row 0.
+
+Call this at startup (after `vga_set_color`) to produce a clean slate before printing the boot banner.
+
+```c
+vga_set_color(0x0F);   /* white on black */
+vga_clear();           /* blank the screen, cursor -> (0,0) */
+```
+
+---
+
+### `void vga_putchar(char c)`
+
+Writes a single character to the screen at the current cursor position, then advances the cursor. The following control characters are handled specially:
+
+| Character | Code | Behavior |
+|---|---|---|
+| Newline | `\n` | Moves cursor to column 0 of the next row |
+| Carriage return | `\r` | Moves cursor to column 0 of the current row |
+| Backspace | `\b` | Moves cursor one column left and overwrites the cell with a space |
+| Tab | `\t` | Advances cursor to the next 8-column boundary (`cursor_x = (cursor_x + 8) & ~7`) |
+
+After writing any character, if `cursor_x` reaches `VGA_WIDTH` (80) the cursor wraps to the start of the next row. If `cursor_y` reaches `VGA_HEIGHT` (25), the driver calls the internal `vga_scroll()` function before updating the hardware cursor.
+
+```c
+vga_putchar('H');
+vga_putchar('i');
+vga_putchar('\n');
+vga_putchar('\t');   /* advance to next tab stop */
+```
+
+---
+
+### `void vga_print(const char *str)`
+
+Iterates over the NUL-terminated string `str`, calling `vga_putchar` for each byte. Returns when the NUL terminator is reached.
+
+```c
+vga_print("NKLegacy kernel initialized.\n");
+```
+
+---
+
+### `void vga_set_color(uint8_t c)`
+
+Sets the current color attribute used by all subsequent write operations. The attribute byte uses the standard CGA encoding:
+
+```
+Bits 7–4  Background color (high nibble)
+Bits 3–0  Foreground color (low nibble)
+```
+
+The color takes effect for every cell written from this point forward, including cells cleared by `vga_clear()`.
+
+```c
+vga_set_color(0x0A);     /* light green on black */
+vga_print("  [OK] ");
+vga_set_color(0x07);     /* light gray on black */
+vga_print("Keyboard driver loaded\n");
+```
+
+---
+
+### `void vga_update_cursor(void)`
+
+Writes the current `cursor_x` / `cursor_y` position to the VGA CRTC (CRT Controller) so that the blinking hardware cursor tracks the software cursor. The position is encoded as a linear cell index:
+
+```
+pos = cursor_y * VGA_WIDTH + cursor_x
+```
+
+It is sent to the CRTC over I/O ports `0x3D4` / `0x3D5`:
+
+- Register `0x0F` (low byte): `outb(0x3D4, 0x0F); outb(0x3D5, pos & 0xFF)`
+- Register `0x0E` (high byte): `outb(0x3D4, 0x0E); outb(0x3D5, (pos >> 8) & 0xFF)`
+
+`vga_update_cursor` is called automatically at the end of every `vga_putchar` invocation, so drivers do not normally need to call it directly.
+
+---
+
+### `void vga_set_cursor(size_t x, size_t y)`
+
+Sets the internal `cursor_x` and `cursor_y` state variables to the supplied column and row, then calls `vga_update_cursor` to push the new position to hardware. Use this to jump the cursor to an arbitrary screen location.
+
+```c
+vga_set_cursor(0, 0);    /* home the cursor after vga_clear */
+```
+
+## Color Attribute Reference
+
+The table below lists every color attribute used in `kmain.c`. All entries have a black background (nibble `0`), except the BSOD color.
+
+| Value | Foreground | Background | Usage in kmain.c |
+|---|---|---|---|
+| `0x0F` | White | Black | Default text, kernel version string |
+| `0x0B` | Light cyan | Black | Kernel name in boot banner |
+| `0x08` | Dark gray | Black | Copyright notice |
+| `0x0A` | Light green | Black | `[OK]` status labels |
+| `0x07` | Light gray | Black | Subsystem status descriptions |
+| `0x0E` | Yellow | Black | Shell prompt (`nklegacy>`) |
+| `0x0C` | Light red | Black | `nkbuild>` prompt in build mode |
+| `0x1F` | White | Blue | Blue Screen of Death |
+
+## Scrolling
+
+When `cursor_y` reaches `VGA_HEIGHT` (25) after a `vga_putchar` call, the internal `vga_scroll()` function is invoked automatically:
+
+<Steps>
+  <Step title="Copy rows upward">
+    Every cell in rows 1–24 is copied to the row above (rows 0–23), shifting the entire visible content up by one line.
+  </Step>
+  <Step title="Clear the last row">
+    Row 24 (the bottom row) is filled with space characters using the current color attribute, providing a blank line for new output.
+  </Step>
+  <Step title="Adjust cursor">
+    `cursor_y` is set to `VGA_HEIGHT - 1` (24) so the next character is written on the freshly cleared bottom row.
+  </Step>
+</Steps>
+
+## Usage Example
+
+The following snippet reproduces the NT-style boot banner printed by `kmain.c`:
+
+```c
+#include "driver/vga/vga.h"
+
+/* Called early in kmain, after serial_init */
+void print_boot_banner(void) {
+    /* Clear screen with white-on-black default */
+    vga_set_color(0x0F);
+    vga_clear();
+
+    /* Kernel name in light cyan */
+    vga_set_color(0x0B);
+    vga_print("NKLegacy Kernel ");
+
+    /* Version in white */
+    vga_set_color(0x0F);
+    vga_print("v0.1.0\n");
+
+    /* Copyright in dark gray */
+    vga_set_color(0x08);
+    vga_print("Copyright (c) 2026 William Beauregard. MIT License.\n\n");
+
+    /* [OK] line: green label, gray description */
+    vga_set_color(0x0A);
+    vga_print("  [OK] ");
+    vga_set_color(0x07);
+    vga_print("PS/2 Keyboard Driver\n");
+
+    /* Yellow shell prompt */
+    vga_set_color(0x0E);
+    vga_print("nklegacy> ");
+    vga_set_color(0x0F);
+}
+```

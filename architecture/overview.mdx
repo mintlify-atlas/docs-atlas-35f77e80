@@ -1,0 +1,99 @@
+---
+title: "NKLegacy Architecture: Boot to Shell"
+sidebarTitle: "Overview"
+description: "A top-down view of NKLegacy's architecture: how NKBootman hands off to the kernel, how hardware is initialized, and how the shell loop runs."
+---
+
+NKLegacy follows a classic two-stage bare-metal boot pipeline. A custom MBR bootloader — NKBootman — loads a second stage that transitions the CPU into 32-bit protected mode and copies the kernel binary to physical address 0x100000 (1 MB). Once control reaches `kmain`, the kernel proceeds through five tightly ordered initialization phases: early hardware setup, CPU descriptor table loading, interrupt subsystem bringup, the boot banner and filesystem init, and finally the interactive shell loop. Alternatively, GRUB can boot the kernel directly via the Multiboot protocol, bypassing NKBootman entirely.
+
+## Boot Pipeline Overview
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 0: Bootloader                                             │
+│  NKBootman Stage 1 (MBR, 0x7C00) → Stage 2 (0x7E00)            │
+│  Stage 2: A20 enable → GDT → Protected Mode → copy to 0x100000  │
+│  — OR — GRUB Multiboot: loads ELF, jumps to _start              │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 1: Early Hardware Init                                    │
+│  serial_init(COM1)  →  vga_set_color / vga_clear                │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 2: CPU Tables                                             │
+│  gdt_init()  →  idt_init()                                      │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 3: Interrupt Hardware                                     │
+│  pic_init()  →  pit_init()  →  keyboard_init()  →  sti          │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 4: Boot Banner + NKFS Init                                │
+│  VGA banner, [OK] status lines, kprintf tick count, nkfs_init() │
+└────────────────────────┬─────────────────────────────────────────┘
+                         │
+                         ▼
+┌──────────────────────────────────────────────────────────────────┐
+│  Phase 5: Shell Loop                                             │
+│  cmd_run()  — infinite loop, never returns                      │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## Initialization Phases
+
+<Steps>
+  <Step title="Phase 1 — Early Hardware Init">
+    The first thing `kmain` does — before any CPU tables exist — is bring up the two output devices the rest of the boot will rely on.
+
+    `serial_init(COM1)` programs COM1 at 115200 baud so that all subsequent `serial_print` calls produce debug output on the host terminal even before VGA is cleared. Immediately after, `vga_set_color(0x0F)` (white on black) and `vga_clear()` blank the 80×25 text framebuffer at `0xB8000` ready for kernel output.
+  </Step>
+
+  <Step title="Phase 2 — CPU Tables">
+    With I/O available, the kernel loads the two fundamental x86 descriptor tables.
+
+    `gdt_init()` installs a flat 32-bit GDT (null descriptor, ring-0 code, ring-0 data) and reloads all segment registers. `idt_init()` registers ISR stubs for all 256 interrupt vectors and loads the IDT register. Both steps must complete before interrupts are enabled.
+  </Step>
+
+  <Step title="Phase 3 — Interrupt Hardware">
+    With the IDT in place, the hardware interrupt controllers are configured.
+
+    `pic_init()` remaps the 8259A PIC so that IRQ0–IRQ15 land at vectors 0x20–0x2F, well above the reserved CPU exception range. `pit_init()` programs the 8253/8254 PIT to fire IRQ0 at 1000 Hz, providing a millisecond-resolution tick counter. `keyboard_init()` enables the PS/2 keyboard IRQ. Finally, `__asm__ volatile("sti")` sets the CPU interrupt-enable flag and live interrupt handling begins.
+  </Step>
+
+  <Step title="Phase 4 — Boot Banner and NKFS Init">
+    Once all hardware is stable the kernel displays its NT-style boot banner on the VGA console. The version string is assembled from the compile-time macros `NK_VERSION "0.1.0"` and `NK_CODENAME "Legacy"`, alongside the build date and time. A series of `[OK]` status lines confirms each successfully initialized subsystem. `kprintf` prints the tick count that has accumulated since the PIT started. `nkfs_init()` then zeroes and sets up the in-memory NKFS RAM filesystem, reporting its 512 KB capacity.
+  </Step>
+
+  <Step title="Phase 5 — Shell Loop">
+    `cmd_run()` is the final call in `kmain`. It enters an infinite read-eval loop, reading keyboard input and dispatching built-in commands. It never returns; if it did, the Multiboot entry stub (`boot.asm`) would halt the CPU with `cli` / `hlt`.
+  </Step>
+</Steps>
+
+<Note>
+  The kernel binary is always placed at **physical address 0x100000 (1 MB)**. NKBootman Stage 2 loads the flat binary from disk sector 17 into a temporary buffer at 0x10000, then uses `rep movsd` to relocate it to 0x100000 before jumping there. When GRUB loads the ELF instead, it reads the `PT_LOAD` segment whose load address is 0x100000 (as declared in `linker.ld`) and maps it directly — no relocation step is needed.
+</Note>
+
+## Explore Further
+
+<CardGroup cols={2}>
+  <Card title="Bootloader" icon="microchip" href="/architecture/bootloader">
+    NKBootman two-stage design: MBR layout, A20 enable, protected-mode entry, and GRUB Multiboot as an alternative.
+  </Card>
+  <Card title="Kernel Init" icon="play" href="/architecture/kernel-init">
+    Line-by-line walkthrough of `kmain.c` and the five initialization phases.
+  </Card>
+  <Card title="Memory Layout" icon="map" href="/architecture/memory-layout">
+    Physical memory map, linker script sections, stack placement, and NKFS data pool sizing.
+  </Card>
+  <Card title="GDT & IDT" icon="table" href="/kernel/gdt-idt">
+    How NKLegacy's descriptor tables are structured and loaded at boot time.
+  </Card>
+</CardGroup>

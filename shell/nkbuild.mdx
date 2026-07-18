@@ -1,0 +1,175 @@
+---
+title: "NKBuild: Interactive Minimal PE Binary Builder"
+sidebarTitle: "NKBuild"
+description: "How NKBuild constructs a minimal PE32 executable interactively from the NKLegacy shell, and how to use nkbuild_start, nkbuild_process_line, and nkbuild_get_exe_buffer."
+---
+
+NKBuild is NKLegacy's built-in minimal PE32 binary builder. It runs interactively inside the shell — type `build` to enter NKBuild mode, provide build directives line by line, then type `done` to finalize the binary in memory. The resulting PE32 image can immediately be executed with the `run` command via the [PE Loader](/shell/pe-loader).
+
+## Shell Workflow
+
+<Steps>
+  <Step title="Enter NKBuild mode">
+    Type `build` at the shell prompt. The shell calls `nkbuild_start()`, which resets the internal buffer and prints a status message. The prompt changes to `nkbuild> ` in light red (`0x0C`).
+
+    ```text
+    C:\> build
+    NKBuild: New minimal PE build started.
+    NKBuild: Type 'done' to finish linking.
+    nkbuild>
+    ```
+  </Step>
+  <Step title="Enter directives">
+    Type one directive per line. Each line is passed to `nkbuild_process_line()`. Supported directives are listed in the [Directives](#directives) section below. Unknown directives print an error and are skipped.
+
+    ```text
+    nkbuild> mov eax, 42
+    nkbuild> ret
+    ```
+  </Step>
+  <Step title="Finalize with done">
+    Type `done` to trigger the PE header assembly. NKBuild writes the `IMAGE_DOS_HEADER`, `IMAGE_NT_HEADERS32`, and `IMAGE_SECTION_HEADER` into the front of the buffer, then reports the final binary size.
+
+    ```text
+    nkbuild> done
+    NKBuild: Linked successfully. Size = 513 bytes.
+    C:\>
+    ```
+
+    The shell exits NKBuild mode and returns to the normal prompt.
+  </Step>
+  <Step title="Execute with run">
+    Type `run` at the normal shell prompt to load and execute the built binary via `pe_load_and_run`.
+
+    ```text
+    C:\> run
+    PE: Loading 1 sections to ImageBase 0x1000000...
+    PE: Jmp to EntryPoint: 0x1001000
+    PE: Application exited.
+    ```
+  </Step>
+</Steps>
+
+<Tip>
+  After `build` + `done`, use `run` immediately — the internal buffer is not persistent across reboots. A power cycle or reboot zeroes all of NKFS and NKBuild's static storage.
+</Tip>
+
+---
+
+## API Reference
+
+All functions are declared in `ntoskrnl/exe/nkbuild.h`.
+
+### `nkbuild_start`
+
+```c
+void nkbuild_start(void);
+```
+
+Initializes the internal build state for a new PE image. Zeroes the entire `g_exe_buffer`, resets `g_exe_size` and `g_code_size` to `0`, and positions the internal code write pointer at offset `512` (one FileAlignment unit past the start of the buffer, reserving space for PE headers). Prints:
+
+```text
+NKBuild: New minimal PE build started.
+NKBuild: Type 'done' to finish linking.
+```
+
+Called by the shell automatically when the user types `build`.
+
+---
+
+### `nkbuild_process_line`
+
+```c
+int nkbuild_process_line(const char *line);
+```
+
+Processes one directive line. Leading spaces and tabs are skipped before matching. Returns `0` when `line` is `"done"` and the PE binary has been finalized. Returns `1` for all other inputs (assembled instruction or error).
+
+**Special value — `"done"`**: Finalizes the PE binary by filling in all header structures:
+
+- `IMAGE_DOS_HEADER` with `e_magic = IMAGE_DOS_SIGNATURE` (`0x5A4D`) and `e_lfanew` pointing immediately after the DOS header.
+- `IMAGE_NT_HEADERS32` with `Signature = IMAGE_NT_SIGNATURE` (`0x00004550`), machine type `0x014C` (i386), one section, and `IMAGE_OPTIONAL_HEADER32` fields set for a native PE32 image loaded at `ImageBase = 0x01000000` with `AddressOfEntryPoint = 0x1000`.
+- One `IMAGE_SECTION_HEADER` named `.text` with `VirtualAddress = 0x1000`, characteristics `0x60000020` (READ | EXECUTE | CODE), and `SizeOfRawData` rounded up to the next 512-byte FileAlignment boundary.
+
+When `"done"` is processed, `g_exe_size` is set to `g_code_offset + sec->SizeOfRawData` and the following is printed:
+
+```text
+NKBuild: Linked successfully. Size = <N> bytes.
+```
+
+---
+
+### `nkbuild_get_exe_size`
+
+```c
+uint32_t nkbuild_get_exe_size(void);
+```
+
+Returns the size in bytes of the finalized PE binary stored in the internal buffer. Returns `0` if `done` has not yet been processed (i.e., the build is still in progress or has never been started).
+
+---
+
+### `nkbuild_get_exe_buffer`
+
+```c
+void *nkbuild_get_exe_buffer(void);
+```
+
+Returns a pointer to the static internal `g_exe_buffer` holding the built PE image, or `NULL` if `g_exe_size == 0` (no image has been finalized yet). The `run` shell command passes this pointer directly to `pe_load_and_run`.
+
+---
+
+## Directives
+
+NKBuild supports a minimal subset of x86 assembly directives. Each directive emits raw machine code bytes directly into the `.text` section of the PE image.
+
+| Directive          | Encoding              | Bytes | Description                        |
+|--------------------|-----------------------|-------|------------------------------------|
+| `mov eax, <imm32>` | `0xB8 <imm32-le>`     | 5     | Load a 32-bit immediate into `EAX` |
+| `ret`              | `0xC3`                | 1     | Near return                        |
+| `int 3`            | `0xCC`                | 1     | Breakpoint / software interrupt 3  |
+| `done`             | *(special)*           | —     | Finalize headers and exit build mode |
+
+Any unrecognized directive prints an error and is skipped:
+
+```text
+nkbuild> xor eax, eax
+NKBuild Error: Unknown instruction 'xor eax, eax'
+```
+
+---
+
+## PE Image Layout
+
+The finalized binary is laid out inside the 8 KB (`MAX_EXE_SIZE = 8192`) static buffer as follows:
+
+```text
+Offset 0x000  IMAGE_DOS_HEADER       (e_lfanew → immediately after)
+Offset 0x040  IMAGE_NT_HEADERS32     (Signature + FileHeader + OptionalHeader)
+              IMAGE_SECTION_HEADER   (.text, one entry)
+Offset 0x200  .text raw data         (assembled machine code, FileAlignment-aligned)
+```
+
+<Note>
+  The built PE is kept in a single static 8 KB buffer (`g_exe_buffer`). Each call to `nkbuild_start()` zeroes the entire buffer, overwriting any previously built binary. Only one binary can exist at a time.
+</Note>
+
+---
+
+## Complete Example Session
+
+```text
+C:\> build
+NKBuild: New minimal PE build started.
+NKBuild: Type 'done' to finish linking.
+nkbuild> mov eax, 0
+nkbuild> int 3
+nkbuild> ret
+nkbuild> done
+NKBuild: Linked successfully. Size = 519 bytes.
+C:\> run
+PE: Loading 1 sections to ImageBase 0x1000000...
+PE: Jmp to EntryPoint: 0x1001000
+PE: Application exited.
+C:\>
+```

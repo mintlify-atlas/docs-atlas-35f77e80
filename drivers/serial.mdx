@@ -1,0 +1,151 @@
+---
+title: "Serial Debug Driver: COM1 Output at 115200 Baud"
+sidebarTitle: "Serial"
+description: "Reference for NKLegacy's serial driver: initialize COM1 or COM2, write characters and strings, read input, and monitor kernel output from the host via QEMU -serial stdio."
+---
+
+NKLegacy provides a serial driver for early-boot and ongoing debug output over COM1 (`0x3F8`) at 115200 baud 8-N-1. `kmain.c` calls `serial_init(COM1)` as the very first hardware operation — before VGA is cleared, before GDT/IDT are loaded — making COM1 the earliest observable debug channel. All kernel boot messages are written to COM1 via `serial_print`, and the shell loop polls `serial_getchar(COM1)` so commands can be typed over the serial connection as well as the PS/2 keyboard.
+
+## Port Constants
+
+| Constant | Value | Description |
+|---|---|---|
+| `COM1` | `0x3F8` | I/O base address for COM1 |
+| `COM2` | `0x2F8` | I/O base address for COM2 |
+
+All API functions accept a `uint16_t port` parameter so they work with either port without duplication.
+
+## API Reference
+
+### `void serial_init(uint16_t port)`
+
+Configures the UART at `port` for 115200 baud, 8 data bits, no parity, 1 stop bit, with the FIFO enabled. The initialization sequence is:
+
+<Steps>
+  <Step title="Disable interrupts">
+    Write `0x00` to `port + 1` to suppress UART-generated IRQs (the kernel uses polled I/O).
+  </Step>
+  <Step title="Set baud rate divisor">
+    Enable DLAB by writing `0x80` to `port + 3` (Line Control Register), then write divisor low byte `0x01` to `port + 0` and high byte `0x00` to `port + 1`. A divisor of 1 selects 115200 baud.
+  </Step>
+  <Step title="Configure line parameters">
+    Write `0x03` to `port + 3`: 8 data bits, no parity, 1 stop bit (clears DLAB).
+  </Step>
+  <Step title="Enable FIFO">
+    Write `0xC7` to `port + 2` (FIFO Control Register): enable FIFO, clear transmit and receive FIFOs, set 14-byte trigger threshold.
+  </Step>
+  <Step title="Set modem control">
+    Write `0x0B` to `port + 4`: enable IRQs at the modem level, assert RTS and DSR.
+  </Step>
+</Steps>
+
+```c
+/* First call in kmain — before any other driver */
+serial_init(COM1);
+serial_print(COM1, "NKLegacy: Serial debug initialized\n");
+```
+
+---
+
+### `void serial_putchar(uint16_t port, char c)`
+
+Polls the Line Status Register (`port + 5`) until bit 5 (Transmitter Holding Register Empty) is set, then writes the byte to the transmit register (`port + 0`). When `serial_print` encounters a `\n` it automatically prepends a `\r` so terminals display correctly.
+
+```c
+serial_putchar(COM1, 'A');
+```
+
+---
+
+### `void serial_print(uint16_t port, const char *str)`
+
+Iterates over the NUL-terminated string `str`. For each `\n` byte it first sends `\r` (CR+LF conversion), then sends the byte itself via `serial_putchar`.
+
+```c
+serial_print(COM1, "NKLegacy: Initializing PIC...\n");
+```
+
+---
+
+### `char serial_getchar(uint16_t port)`
+
+Non-blocking read. Checks bit 0 of the Line Status Register (`port + 5`): if data is available it reads and returns the byte from `port + 0`; if no data is ready it returns `0` immediately without blocking.
+
+```c
+char c = serial_getchar(COM1);
+if (c) {
+    /* process incoming byte */
+}
+```
+
+## QEMU Serial Monitoring
+
+The `make run` target passes `-serial stdio` to QEMU, connecting the guest COM1 port directly to the host terminal's standard I/O:
+
+```text
+qemu-system-i386 -cdrom build/nklegacy.iso -serial stdio -m 32M
+```
+
+This means every `serial_print` call appears inline in the same terminal window you launched QEMU from. The expected early-boot serial log is:
+
+```text
+NKLegacy: Serial debug initialized
+NKLegacy: Loading GDT...
+NKLegacy: Loading IDT...
+NKLegacy: Initializing PIC...
+NKLegacy: Initializing PIT...
+NKLegacy: Initializing keyboard...
+NKLegacy: Interrupts enabled
+NKLegacy: Kernel initialization complete
+```
+
+For headless testing (no VGA window), use `make run-serial`:
+
+```text
+qemu-system-i386 -cdrom build/nklegacy.iso -serial stdio -m 32M -display none -no-reboot
+```
+
+## Usage Examples
+
+### Early debug before VGA is available
+
+```c
+#include "driver/serial/serial.h"
+
+void kmain(uint32_t magic, void *mboot_info) {
+    (void)magic; (void)mboot_info;
+
+    /* Serial is safe to use immediately — no memory allocator needed */
+    serial_init(COM1);
+    serial_print(COM1, "NKLegacy: Serial debug initialized\n");
+
+    /* VGA init comes later */
+    vga_set_color(0x0F);
+    vga_clear();
+    /* ... */
+}
+```
+
+### Serial fallback in the shell input loop
+
+The shell in `cmd.c` reads from `keyboard_getchar()` first. If no PS/2 key is available it falls back to `serial_getchar(COM1)`, allowing commands to be entered over the serial link:
+
+```c
+for (;;) {
+    char c = keyboard_getchar();
+    if (!c)
+        c = serial_getchar(COM1);
+
+    if (c) {
+        /* echo and buffer the character */
+        vga_putchar(c);
+        cmd_buf[cmd_i++] = c;
+    } else {
+        __asm__ volatile("pause");   /* reduce CPU spin */
+    }
+}
+```
+
+<Tip>
+  The shell loop polls both `keyboard_getchar()` and `serial_getchar(COM1)` on every iteration — commands can be typed over the serial link as well as the PS/2 keyboard. This is especially useful when running NKLegacy under QEMU with `make run-serial` (no display), where the serial connection is the only interactive channel.
+</Tip>

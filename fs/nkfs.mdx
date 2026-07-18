@@ -1,0 +1,217 @@
+---
+title: "NKFS: In-Memory RAM Filesystem"
+sidebarTitle: "NKFS"
+description: "Reference for NKFS, NKLegacy's in-memory RAM filesystem: node structure, directory tree API, file creation, and data writes within a 512 KB static pool."
+---
+
+NKFS is NKLegacy's built-in RAM-based filesystem. It uses a static pool of 256 nodes and a 512 KB data buffer — no dynamic allocation — and exposes a tree-structured filesystem rooted at `C:`. All files and directories live entirely in memory and are accessible through a small C API defined in `ntoskrnl/fs/nkfs/nkfs.h`.
+
+## Data Model
+
+### Node Structure
+
+Every file and directory in NKFS is represented by a single `nkfs_node_t` struct:
+
+```c
+#define NKFS_FILE 0
+#define NKFS_DIR  1
+
+typedef struct nkfs_node {
+    char name[32];              /* Null-terminated name, max 31 characters */
+    uint8_t type;               /* NKFS_FILE or NKFS_DIR                  */
+    uint32_t size;              /* Bytes of data (files) or child count (dirs) */
+    uint8_t *data;              /* Pointer into data_pool; NULL for dirs   */
+
+    struct nkfs_node *parent;
+    struct nkfs_node *first_child;
+    struct nkfs_node *next_sibling;
+} nkfs_node_t;
+```
+
+### Static Limits
+
+Both pools are statically allocated in `.bss` — no `malloc` is ever called:
+
+| Constant          | Value               | Meaning                              |
+|-------------------|---------------------|--------------------------------------|
+| `MAX_NODES`       | `256`               | Maximum total nodes (files + dirs)   |
+| `DATA_POOL_SIZE`  | `512 * 1024` (512 KB) | Total capacity for all file data   |
+
+```c
+static nkfs_node_t node_pool[MAX_NODES];   /* All nodes live here */
+static uint8_t     data_pool[DATA_POOL_SIZE]; /* All file bytes live here */
+```
+
+### Linked-List Tree
+
+NKFS uses a left-child / right-sibling tree structure:
+
+- A directory's first child is stored in `first_child`.
+- Each child's next sibling (another child of the same parent) is reached via `next_sibling`.
+- Every node holds a back-pointer to its `parent`.
+
+New children are prepended at the head of the sibling list, so `dir` listing order is reverse-insertion order.
+
+```
+root (C:)
+  └── first_child → docs (DIR)
+                        └── next_sibling → src (DIR)
+                                              └── next_sibling → hello.txt (FILE)
+```
+
+<Note>
+  NKFS lives entirely in `.bss` — both the 256-node pool and the 512 KB data pool are zero-initialized at boot by the bootloader/startup code and do **not** occupy space inside the kernel binary image on disk.
+</Note>
+
+---
+
+## API Reference
+
+### `nkfs_init`
+
+```c
+void nkfs_init(void);
+```
+
+Initializes the filesystem. Zeroes both the node pool and the data pool, resets the allocation counters, then allocates the root node named `C:` of type `NKFS_DIR`. Prints a capacity confirmation via `kprintf`:
+
+```text
+NKFS: RAM filesystem initialized (Capacity: 512 KB).
+```
+
+Call this once during kernel startup before any other NKFS function.
+
+---
+
+### `nkfs_get_root`
+
+```c
+nkfs_node_t *nkfs_get_root(void);
+```
+
+Returns a pointer to the root `C:` directory node. This is the entry point for all path traversal. The returned pointer is valid for the lifetime of the kernel session.
+
+---
+
+### `nkfs_find_child`
+
+```c
+nkfs_node_t *nkfs_find_child(nkfs_node_t *parent, const char *name);
+```
+
+Performs a linear scan through all immediate children of `parent`, comparing each child's `name` field against `name` using `strcmp`. Returns the matching node, or `NULL` if:
+
+- `parent` is `NULL`.
+- `parent->type` is not `NKFS_DIR`.
+- No child with the given name exists.
+
+This function does **not** recurse into subdirectories.
+
+---
+
+### `nkfs_mkdir`
+
+```c
+nkfs_node_t *nkfs_mkdir(nkfs_node_t *parent, const char *name);
+```
+
+Creates a new subdirectory named `name` under `parent`. Returns a pointer to the new node on success, or `NULL` if:
+
+- `parent` is `NULL` or not a directory.
+- The node pool is full (`node_count >= MAX_NODES`).
+- A child with the same name already exists (checked via `nkfs_find_child`).
+
+The new directory node is prepended to `parent->first_child` and `parent->size` is incremented.
+
+---
+
+### `nkfs_create_file`
+
+```c
+nkfs_node_t *nkfs_create_file(nkfs_node_t *parent, const char *name);
+```
+
+Creates a new file node named `name` under `parent`. If a file with `name` already exists it is **reopened** — its `size` is reset to `0` and its `data` pointer is cleared. Returns `NULL` if:
+
+- `parent` is `NULL` or not a directory.
+- The node pool is full.
+- A **directory** with the same name already exists (type collision).
+
+---
+
+### `nkfs_write_file`
+
+```c
+int nkfs_write_file(nkfs_node_t *file, const char *data, uint32_t size);
+```
+
+Copies `size` bytes from `data` into the shared data pool starting at the current `data_pool_used` offset. Updates `file->data` to point at the newly written region and sets `file->size = size`. Returns `0` on success, or `-1` if:
+
+- `file` is `NULL` or `file->type != NKFS_FILE`.
+- The data pool would overflow (`data_pool_used + size > DATA_POOL_SIZE`).
+
+<Info>
+  `nkfs_write_file` always appends to the pool at `data_pool_used` and advances the pointer. Calling it again on the same node allocates a **new** region — the old data remains in the pool but is no longer referenced by the node. There is no free or reuse mechanism.
+</Info>
+
+---
+
+## Usage Example
+
+The following snippet creates a `docs` directory under the root, creates a file inside it, writes a string, and reads it back byte-by-byte:
+
+```c
+#include "fs/nkfs/nkfs.h"
+#include "kernel/kprintf.h"
+
+void demo(void) {
+    /* Get the root C: node */
+    nkfs_node_t *root = nkfs_get_root();
+
+    /* Create C:\docs */
+    nkfs_node_t *docs = nkfs_mkdir(root, "docs");
+    if (!docs) {
+        kprintf("mkdir failed\n");
+        return;
+    }
+
+    /* Create C:\docs\readme.txt */
+    nkfs_node_t *file = nkfs_create_file(docs, "readme.txt");
+    if (!file) {
+        kprintf("create_file failed\n");
+        return;
+    }
+
+    /* Write content */
+    const char *content = "Hello from NKFS!\n";
+    if (nkfs_write_file(file, content, strlen(content)) != 0) {
+        kprintf("write failed: data pool full\n");
+        return;
+    }
+
+    /* Read content back */
+    kprintf("readme.txt (%u bytes): ", file->size);
+    for (uint32_t i = 0; i < file->size; i++) {
+        vga_putchar(file->data[i]);
+    }
+}
+```
+
+---
+
+## Limitations
+
+<CardGroup cols={2}>
+  <Card title="No deletion or rename" icon="trash">
+    There is no `nkfs_delete` or `nkfs_rename`. Nodes and their data pool allocations are permanent for the lifetime of the session.
+  </Card>
+  <Card title="Single-write semantics" icon="pen">
+    `nkfs_write_file` does not overwrite in-place. Each call advances `data_pool_used` and allocates a new region; old data is leaked in the pool.
+  </Card>
+  <Card title="No persistence" icon="power-off">
+    All data is stored in RAM. Everything is lost on reboot or power-off — there is no disk backing.
+  </Card>
+  <Card title="Name length cap" icon="font">
+    Node names are stored in a fixed `char name[32]` buffer. Names are truncated to 31 characters via `strncpy`.
+  </Card>
+</CardGroup>

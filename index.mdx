@@ -1,20 +1,62 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "NKLegacy: Windows NT-inspired x86 Kernel"
+sidebarTitle: "Home"
+description: "NKLegacy is a bare-metal x86 OS kernel inspired by Windows NT, written from scratch in C and assembly with a bootloader, drivers, filesystem, and command shell."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+NKLegacy is a Windows NT-inspired operating system kernel for x86 (i386), built entirely from scratch in C and x86 assembly. It boots either through its own two-stage **NKBootman** bootloader or via GRUB/Multiboot, sets up protected mode, initializes hardware, and drops you into an interactive NT-style command shell — all without any host OS dependencies.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build and run NKLegacy in QEMU in under five minutes
+  </Card>
+  <Card title="Architecture" icon="microchip" href="/architecture/overview">
+    Understand the boot sequence, memory layout, and kernel design
+  </Card>
+  <Card title="Kernel Subsystems" icon="layer-group" href="/kernel/gdt-idt">
+    GDT, IDT, interrupts, kprintf, and panic handling
+  </Card>
+  <Card title="Drivers" icon="plug" href="/drivers/vga">
+    VGA text mode, serial debug, PIC/PIT timer, and PS/2 keyboard
+  </Card>
+  <Card title="Filesystem" icon="folder-open" href="/fs/nkfs">
+    NKFS in-memory RAM filesystem with directory tree and file I/O
+  </Card>
+  <Card title="Shell & PE Loader" icon="terminal" href="/shell/commands">
+    Built-in command shell, NKBuild PE builder, and PE loader
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## What's Inside
+
+NKLegacy implements the full stack from the very first BIOS instruction to an interactive user shell:
+
+<Steps>
+  <Step title="Boot">
+    The **NKBootman** MBR loads Stage 2, which switches the CPU to 32-bit protected mode and jumps to the kernel. Alternatively, boot via GRUB with the Multiboot protocol.
+  </Step>
+  <Step title="CPU Initialization">
+    The kernel sets up the **Global Descriptor Table** (GDT) with kernel/user code and data segments, then loads the **Interrupt Descriptor Table** (IDT) with handlers for all 256 interrupt vectors.
+  </Step>
+  <Step title="Hardware Drivers">
+    The **8259 PIC** is remapped, the **8253 PIT** is configured for 1000 Hz ticks, the **VGA** text-mode console is initialized, COM1 serial debug at 115200 baud is started, and the **PS/2 keyboard** driver is installed.
+  </Step>
+  <Step title="Shell">
+    After mounting the **NKFS** in-memory RAM filesystem, the kernel launches an NT-style interactive shell with commands like `DIR`, `CD`, `MKDIR`, `ECHO`, `TYPE`, and the `BUILD`/`RUN` PE execution pipeline.
+  </Step>
+</Steps>
+
+## Key Features
+
+- **NKBootman** — Custom two-stage bootloader (MBR → Protected Mode), plus GRUB/Multiboot support
+- **Protected Mode** — Full GDT and IDT setup with ISR/IRQ handling
+- **Hardware Drivers** — VGA 80×25, COM1 serial, 8259 PIC, 8253 PIT at 1000 Hz, PS/2 keyboard
+- **kprintf** — Formatted kernel output to both VGA and serial simultaneously
+- **NKFS** — In-memory RAM filesystem (up to 512 KB, 256 nodes) with directory tree and file I/O
+- **NT Shell** — Interactive command shell supporting `DIR`, `CD`, `MKDIR`, `ECHO`, `TYPE`, `CLS`, `VER`
+- **NKBuild & PE Loader** — Minimal PE binary builder and in-kernel PE executor
+- **Runtime Library** — Freestanding `string.h` implementation (`memset`, `memcpy`, `strlen`, `strcmp`, etc.)
+
+<Note>
+  NKLegacy targets the i386 architecture and requires a cross-compilation toolchain with `-m32` support. See [Quickstart](/quickstart) for the full prerequisites list.
+</Note>

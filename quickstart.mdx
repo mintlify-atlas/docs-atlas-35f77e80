@@ -1,47 +1,157 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with NKLegacy in QEMU"
+sidebarTitle: "Quickstart"
+description: "Learn how to build and run NKLegacy on QEMU in under five minutes. Covers prerequisites, build steps for both GRUB ISO and NKBootman floppy, and serial debug output."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This guide walks you through cloning the NKLegacy repository, installing the required toolchain, compiling the kernel and NKBootman bootloader, assembling the disk image, and finally booting the whole system inside QEMU. By the end you will see the NT-style boot banner in your terminal and land at an interactive `C:\>` prompt — all running on bare-metal emulated x86 hardware.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+<Tip>
+  The **GRUB ISO** path (`make run`) is the easiest way to test NKLegacy. It avoids any MBR geometry concerns and lets QEMU load the Multiboot ELF directly via GRUB. Use the NKBootman floppy image (`make run-bootman`) only when you specifically want to test the two-stage bootloader.
+</Tip>
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+## Prerequisites and build steps
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Install prerequisites">
+    You need a 32-bit–capable GCC cross toolchain, NASM, GNU ld, GRUB rescue tools, and QEMU.
+
+    On Debian or Ubuntu:
 
     ```bash
-    npm install your-package
+    sudo apt install gcc nasm grub-pc-bin grub-common xorriso qemu-system-x86
+    ```
+
+    Verify the key tools are available:
+
+    ```bash
+    gcc --version          # must support -m32
+    nasm --version
+    ld --version
+    grub-mkrescue --version
+    qemu-system-i386 --version
     ```
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
+  <Step title="Clone and enter the repository">
     ```bash
-    your-cli init
+    git clone https://github.com/pastaboy12345/NKLegacy.git
+    cd NKLegacy
     ```
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Build everything">
+    A single top-level target compiles the kernel, assembles both bootloader stages, and produces the floppy disk image:
 
     ```bash
-    your-cli start
+    make all
     ```
+
+    This runs three sub-targets in order:
+
+    | Sub-target | What it does |
+    |------------|-------------|
+    | `kernel` | Compiles all C sources and assembles `boot.asm`/`isr.asm` into ELF objects, then links them with `ntoskrnl/linker.ld` to produce `build/nklegacy.elf` (loaded at 0x100000). |
+    | `bootloader` | Assembles `boot/stage1/mbr.asm` → `build/boot/mbr.bin` (flat binary, 512 bytes) and `boot/stage2/stage2.asm` → `build/boot/stage2.bin` (flat binary). |
+    | `image` | Flattens `build/nklegacy.elf` to `build/nklegacy.bin`, creates a 1.44 MB floppy image (`build/nklegacy.img`), writes the MBR to sector 0, Stage 2 to sectors 1–16, and the kernel binary starting at sector 17. |
+
+    After a successful build you will have:
+
+    ```text
+    build/
+    ├── nklegacy.elf        # Kernel ELF (linked at 0x100000, used by GRUB ISO)
+    ├── nklegacy.bin        # Flat kernel binary (used by NKBootman floppy)
+    ├── boot/
+    │   ├── mbr.bin         # Stage 1: 512-byte MBR
+    │   └── stage2.bin      # Stage 2: Protected-mode setup
+    └── nklegacy.img        # 1.44 MB floppy image (MBR + Stage2 + kernel)
+    ```
+  </Step>
+
+  <Step title="Run via GRUB ISO (recommended)">
+    ```bash
+    make run
+    ```
+
+    This target first runs `make iso`, which:
+    - Creates `build/iso/boot/grub/grub.cfg` with a single `NKLegacy` menu entry using `multiboot`.
+    - Calls `grub-mkrescue` to produce `build/nklegacy.iso`.
+
+    QEMU is then launched as:
+
+    ```bash
+    qemu-system-i386 -cdrom build/nklegacy.iso -serial stdio -m 32M
+    ```
+
+    The `-serial stdio` flag mirrors COM1 output to your terminal. You should see the serial debug log appear immediately before the VGA window opens.
+  </Step>
+
+  <Step title="Run via NKBootman floppy">
+    To exercise the custom two-stage bootloader instead of GRUB:
+
+    ```bash
+    make run-bootman
+    ```
+
+    This launches:
+
+    ```bash
+    qemu-system-i386 -fda build/nklegacy.img -serial stdio -m 32M -boot a
+    ```
+
+    QEMU boots from the 1.44 MB floppy image. The MBR loads Stage 2, which switches to protected mode and jumps to the kernel at 0x100000.
+  </Step>
+
+  <Step title="Optional: headless serial-only run">
+    If you only want the serial log and no graphical window (useful in CI or SSH sessions):
+
+    ```bash
+    make run-serial
+    ```
+
+    This uses the GRUB ISO but adds `-display none -no-reboot`:
+
+    ```bash
+    qemu-system-i386 -cdrom build/nklegacy.iso -serial stdio -m 32M -display none -no-reboot
+    ```
+
+    All kernel output is written to stdout via COM1.
   </Step>
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+## Expected boot output
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+A successful boot produces the following on the VGA console (and mirrored to serial):
+
+```text
+NKLegacy Kernel v0.1.0 [Build: <date> <time>]
+Copyright (c) 2026 William Beauregard. MIT License.
+Windows NT-inspired kernel operating system.
+
+  [OK] Global Descriptor Table
+  [OK] Interrupt Descriptor Table
+  [OK] Programmable Interrupt Controller (8259)
+  [OK] Programmable Interval Timer (1000 Hz)
+  [OK] PS/2 Keyboard Driver
+  [OK] Serial Debug (COM1 @ 115200)
+
+NKLegacy kernel initialized. <N> ticks elapsed.
+
+nklegacy>
+```
+
+After NKFS initialises, the shell takes over and you land at:
+
+```text
+C:\>
+```
+
+Type `help` and press Enter to list all available commands.
+
+## Cleaning build artifacts
+
+```bash
+make clean
+```
+
+This removes the entire `build/` directory, including all object files, binaries, and disk images.

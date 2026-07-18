@@ -1,0 +1,208 @@
+---
+title: "GDT and IDT: Protected Mode Descriptor Tables"
+sidebarTitle: "GDT & IDT"
+description: "How NKLegacy sets up the x86 Global Descriptor Table and Interrupt Descriptor Table, including segment selectors, entry structures, and initialization functions."
+---
+
+NKLegacy initializes two fundamental x86 protected mode data structures — the Global Descriptor Table (GDT) and the Interrupt Descriptor Table (IDT) — during the early kernel boot phase. The GDT tells the CPU how the address space is segmented and at what privilege level, while the IDT maps each of the 256 interrupt vectors to an assembly stub that transfers control into the kernel's C interrupt dispatcher.
+
+<Note>
+Both tables are loaded into the CPU via inline assembly instructions: `lgdt` for the GDT and `lidt` for the IDT. NKLegacy performs these loads inside dedicated `gdt_flush` and `idt_flush` routines written in `isr.asm`, which are called at the end of `gdt_init()` and `idt_init()` respectively.
+</Note>
+
+## GDT — Global Descriptor Table
+
+Source: `ntoskrnl/arch/i386/gdt.h` / `ntoskrnl/arch/i386/gdt.c`
+
+The GDT defines the memory segments the CPU may access in 32-bit protected mode. NKLegacy installs five entries: a mandatory null descriptor followed by separate code and data segments for ring 0 (kernel) and ring 3 (user).
+
+### Data Structures
+
+```c
+/* GDT entry structure */
+struct gdt_entry {
+    uint16_t limit_low;
+    uint16_t base_low;
+    uint8_t  base_middle;
+    uint8_t  access;
+    uint8_t  granularity;
+    uint8_t  base_high;
+} __attribute__((packed));
+
+/* GDT pointer structure for lgdt instruction */
+struct gdt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+```
+
+Both structures are marked `__attribute__((packed))` so the compiler emits no padding bytes — the CPU interprets them at the exact binary layout the x86 ABI requires.
+
+### Segment Selectors
+
+NKLegacy defines four non-null selectors. A selector value encodes the GDT index (bits 15–3) plus the RPL (requested privilege level) in bits 1–0.
+
+<ParamField path="GDT_KERNEL_CODE" type="0x08">
+  Kernel code segment — index 1 in the GDT. Execute/read, base 0, limit 4 GB, DPL 0 (ring 0). Loaded into `CS` after the far jump in `gdt_flush`.
+</ParamField>
+
+<ParamField path="GDT_KERNEL_DATA" type="0x10">
+  Kernel data segment — index 2 in the GDT. Read/write, base 0, limit 4 GB, DPL 0 (ring 0). Loaded into `DS`, `ES`, `FS`, `GS`, and `SS` immediately after the GDT is installed.
+</ParamField>
+
+<ParamField path="GDT_USER_CODE" type="0x18">
+  User code segment — index 3 in the GDT. Execute/read, base 0, limit 4 GB, DPL 3 (ring 3). Reserved for future user-mode process support.
+</ParamField>
+
+<ParamField path="GDT_USER_DATA" type="0x20">
+  User data segment — index 4 in the GDT. Read/write, base 0, limit 4 GB, DPL 3 (ring 3). Reserved for future user-mode process support.
+</ParamField>
+
+### `gdt_init`
+
+```c
+void gdt_init(void);
+```
+
+Populates the five GDT entries (null, kernel code, kernel data, user code, user data), fills `gdt_ptr` with the table's address and byte-length limit, then calls `gdt_flush` to execute `lgdt` and reload all segment registers.
+
+```c
+void gdt_init(void) {
+    gdt_pointer.limit = (sizeof(struct gdt_entry) * 5) - 1;
+    gdt_pointer.base  = (uint32_t)&gdt_entries;
+
+    /* Null segment */
+    gdt_set_entry(0, 0, 0, 0, 0);
+
+    /* Kernel code segment: base=0, limit=4GB, exec/read, ring 0 */
+    gdt_set_entry(1, 0, 0xFFFFFFFF, 0x9A, 0xCF);
+
+    /* Kernel data segment: base=0, limit=4GB, read/write, ring 0 */
+    gdt_set_entry(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+
+    /* User code segment: base=0, limit=4GB, exec/read, ring 3 */
+    gdt_set_entry(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
+
+    /* User data segment: base=0, limit=4GB, read/write, ring 3 */
+    gdt_set_entry(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+
+    gdt_flush((uint32_t)&gdt_pointer);
+}
+```
+
+---
+
+## IDT — Interrupt Descriptor Table
+
+Source: `ntoskrnl/arch/i386/idt.h` / `ntoskrnl/arch/i386/idt.c`
+
+The IDT maps all 256 x86 interrupt vectors to handler stubs. Vectors 0–31 are reserved for CPU exceptions, and vectors 32–47 are mapped to hardware IRQs after the 8259 PIC is remapped by `pic_init`.
+
+### Data Structures
+
+```c
+/* IDT entry structure */
+struct idt_entry {
+    uint16_t base_low;
+    uint16_t sel;        /* Kernel segment selector */
+    uint8_t  always0;
+    uint8_t  flags;
+    uint16_t base_high;
+} __attribute__((packed));
+
+/* IDT pointer structure for lidt instruction */
+struct idt_ptr {
+    uint16_t limit;
+    uint32_t base;
+} __attribute__((packed));
+
+/* Registers pushed by ISR stubs */
+typedef struct {
+    uint32_t ds;
+    uint32_t edi, esi, ebp, useless_esp, ebx, edx, ecx, eax;  /* pusha */
+    uint32_t int_no, err_code;
+    uint32_t eip, cs, eflags, esp, ss;  /* pushed by CPU */
+} registers_t;
+
+/* Interrupt handler callback type */
+typedef void (*isr_handler_t)(registers_t *);
+```
+
+#### `registers_t` field reference
+
+| Field | Source | Description |
+|---|---|---|
+| `ds` | ISR stub | Data segment at time of interrupt |
+| `edi`…`eax` | `pusha` | General-purpose registers saved by the stub |
+| `int_no` | ISR stub | Interrupt vector number (0–255) |
+| `err_code` | CPU / stub | CPU error code, or `0` if the exception has none |
+| `eip`, `cs`, `eflags` | CPU | Interrupted instruction pointer, code segment, flags |
+| `esp`, `ss` | CPU | Stack pointer and segment (saved only on privilege change) |
+
+### `idt_init`
+
+```c
+void idt_init(void);
+```
+
+Zeroes all 256 IDT entries and all handler slots, then installs assembly stubs for vectors 0–31 (CPU exceptions) and vectors 32–47 (hardware IRQs). Every entry uses selector `0x08` (kernel code segment) and flags `0x8E` (present, ring 0, 32-bit interrupt gate). Finally it calls `idt_flush` to execute `lidt`.
+
+### `idt_register_handler`
+
+```c
+void idt_register_handler(uint8_t n, isr_handler_t handler);
+```
+
+Registers a C-level callback for interrupt vector `n`. When an interrupt fires, the assembly stub saves CPU state into a `registers_t` and calls either `isr_handler` (exceptions) or `irq_handler` (hardware IRQs), both of which look up the registered callback by `regs->int_no` and invoke it.
+
+<ParamField path="n" type="uint8_t" required>
+  Interrupt vector number (0–255). Use values 32–47 for hardware IRQ lines after PIC remapping.
+</ParamField>
+
+<ParamField path="handler" type="isr_handler_t" required>
+  A function pointer with signature `void handler(registers_t *)`. Receives a pointer to the full CPU state at the time of the interrupt.
+</ParamField>
+
+---
+
+## Usage Example — Registering a Custom IRQ Handler
+
+The example below mirrors the real keyboard driver (`keyboard.c`) and shows the complete pattern for registering an IRQ handler.
+
+```c
+#include "arch/i386/idt.h"
+#include "arch/i386/io.h"
+#include "driver/pic/pic.h"
+
+/* IRQ1 fires on every PS/2 keypress */
+static void my_keyboard_handler(registers_t *regs) {
+    (void)regs;
+
+    /* Read scancode from PS/2 data port */
+    uint8_t scancode = inb(0x60);
+    /* ... process scancode ... */
+
+    /* Acknowledge the interrupt to the PIC */
+    pic_send_eoi(1);  /* IRQ line 1 = keyboard */
+}
+
+void my_keyboard_init(void) {
+    /* IRQ1 is mapped to IDT vector 33 after pic_init() */
+    idt_register_handler(33, my_keyboard_handler);
+}
+```
+
+<Steps>
+  <Step title="Initialize the PIC">
+    Call `pic_init()` before any IRQ handler is registered so that the 8259 PIC is remapped to vectors 32–47.
+  </Step>
+  <Step title="Initialize the IDT">
+    Call `idt_init()` to install all 256 assembly stubs and load the IDT register.
+  </Step>
+  <Step title="Register your handler">
+    Call `idt_register_handler(vector, callback)` with the vector number and your C function pointer.
+  </Step>
+  <Step title="Enable interrupts">
+    Execute `sti` (or simply allow the boot path to enable interrupts) so the CPU begins dispatching.
+  </Step>
+</Steps>

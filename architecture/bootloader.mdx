@@ -1,0 +1,143 @@
+---
+title: "NKBootman: Two-Stage x86 Bootloader Design"
+sidebarTitle: "Bootloader"
+description: "How NKBootman's MBR Stage 1 and Protected Mode Stage 2 load and hand off to the NKLegacy kernel, and how GRUB Multiboot works as an alternative."
+---
+
+NKBootman is a custom two-stage x86 bootloader written entirely in 16-bit and 32-bit NASM assembly. Stage 1 occupies exactly 512 bytes — the Master Boot Record — and its sole job is to load Stage 2 from sectors 1–16 of the disk image into memory at 0x7E00 and jump to it. Stage 2 handles the heavier lifting: enabling the A20 address line, loading the flat kernel binary from disk, setting up a minimal GDT, switching the CPU into 32-bit protected mode, relocating the kernel to its permanent home at 0x100000, and jumping to it. As an alternative, GRUB's Multiboot protocol can load the ELF kernel image directly — this is the recommended path for development and testing.
+
+## Stage 1 — MBR (`boot/stage1/mbr.asm`)
+
+Stage 1 is assembled with `nasm -f bin` and written to sector 0 of the disk image. It is exactly 512 bytes, padded to byte 510 with zeros and terminated by the `0xAA55` boot signature that the BIOS checks before transferring control.
+
+On entry the BIOS passes the boot drive number in `DL`; Stage 1 immediately saves it to the `boot_drive` variable so it can be forwarded to Stage 2. After setting up a minimal real-mode stack (growing downward from 0x7C00) and clearing the screen, Stage 1 uses **INT 13h AH=02h** to read 16 consecutive sectors from the disk starting at CHS sector 2 (the sector immediately after the MBR) into the buffer at `0x7E00`:
+
+```asm
+    ; Disk read: INT 13h, AH=02h
+    mov ah, 0x02                ; Read sectors
+    mov al, STAGE2_SECTORS      ; Number of sectors (16)
+    mov ch, 0                   ; Cylinder 0
+    mov cl, 2                   ; Sector 2 (1-indexed, sector 1 = MBR)
+    mov dh, 0                   ; Head 0
+    mov dl, [boot_drive]        ; Drive number
+    mov bx, STAGE2_LOAD_ADDR    ; Buffer address ES:BX (0x7E00)
+    int 0x13
+    jc disk_error
+```
+
+If the BIOS reports a read error (carry flag set) the bootloader prints `DISK ERROR!` and halts with `cli` / `hlt`. On success it passes the saved boot drive number in `DL` and executes a far jump to `0x0000:0x7E00` to hand control to Stage 2.
+
+The `0xAA55` boot signature is placed by the `times 510 - ($ - $$) db 0` / `dw 0xAA55` idiom — a compile-time assertion that the entire Stage 1 body fits within 510 bytes.
+
+## Stage 2 — Protected-Mode Loader (`boot/stage2/stage2.asm`)
+
+Stage 2 is assembled at origin `0x7E00` and may use up to the 16 sectors (8 KB) that Stage 1 loaded. It performs four major steps before reaching the kernel.
+
+**1. A20 enable.** Stage 2 uses the "fast A20" method: it reads port `0x92`, sets bit 1 (A20 enable) while masking bit 0 (to avoid a system reset), and writes the value back.
+
+```asm
+    in al, 0x92
+    or al, 2
+    and al, 0xFE          ; Don't reset!
+    out 0x92, al
+```
+
+**2. Kernel load.** With the full 32-bit address space about to become available, Stage 2 uses INT 13h again to read 128 sectors (64 KB) from CHS sector 18 — immediately after the Stage 2 area — into the temporary buffer at segment `0x1000` (physical address `0x10000`).
+
+**3. Protected-mode entry.** Stage 2 defines its own minimal flat GDT (null, code, data descriptors) in-line, calls `lgdt [gdt_descriptor]`, sets bit 0 of CR0 to enable protected mode, and performs a far jump to flush the prefetch queue and load the 32-bit code segment selector:
+
+```asm
+    cli
+    lgdt [gdt_descriptor]
+
+    mov eax, cr0
+    or eax, 1
+    mov cr0, eax
+
+    jmp 0x08:protected_mode_entry
+```
+
+**4. Kernel relocation and jump.** In `protected_mode_entry` (32-bit code), Stage 2 sets all data segment registers to the flat data selector `0x10`, establishes a temporary stack at `0x90000`, and uses `rep movsd` to copy the kernel from its temporary buffer at `0x10000` to its permanent location at `0x100000`:
+
+```asm
+    mov ax, 0x10               ; Data segment selector
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+    mov ss, ax
+    mov esp, 0x90000           ; Temporary stack
+
+    mov esi, 0x10000           ; Source (temp load buffer)
+    mov edi, 0x100000          ; Destination (1 MB)
+    mov ecx, (128 * 512) / 4   ; Copy as dwords
+    rep movsd
+
+    jmp 0x100000               ; Jump to kernel entry point
+```
+
+## GRUB / Multiboot (`ntoskrnl/arch/i386/boot.asm`)
+
+The kernel ELF image embeds a Multiboot header in its `.multiboot` section. The linker script guarantees this section is placed at the very start of the image (before `.text`) so that it falls within the first 8 KB as the Multiboot specification requires.
+
+```asm
+MBOOT_MAGIC     equ 0x1BADB002
+MBOOT_FLAGS     equ 0x00000003  ; Align modules + provide memory map
+MBOOT_CHECKSUM  equ -(MBOOT_MAGIC + MBOOT_FLAGS)
+
+section .multiboot
+align 4
+    dd MBOOT_MAGIC
+    dd MBOOT_FLAGS
+    dd MBOOT_CHECKSUM
+```
+
+When GRUB boots the kernel it finds this header, maps the ELF load segments, and jumps to the `_start` symbol declared in `section .text`. The entry stub sets up the kernel stack, pushes the Multiboot magic value (`EAX`) and the Multiboot info pointer (`EBX`) as arguments, and calls `kmain`:
+
+```asm
+section .bss
+align 16
+stack_bottom:
+    resb 16384          ; 16 KB stack
+stack_top:
+
+section .text
+global _start
+extern kmain
+
+_start:
+    mov esp, stack_top
+
+    push ebx            ; Multiboot info structure pointer
+    push eax            ; Multiboot magic number (0x2BADB002)
+
+    call kmain
+
+.hang:
+    cli
+    hlt
+    jmp .hang
+```
+
+## Floppy Disk Image Layout
+
+The `make image` target assembles a 1.44 MB floppy image using `dd` to place each component at its correct sector offset:
+
+```text
+dd if=/dev/zero              of=build/nklegacy.img  bs=512 count=2880
+dd if=build/boot/mbr.bin     of=build/nklegacy.img  conv=notrunc bs=512 count=1
+dd if=build/boot/stage2.bin  of=build/nklegacy.img  conv=notrunc bs=512 seek=1
+dd if=build/nklegacy.bin     of=build/nklegacy.img  conv=notrunc bs=512 seek=17
+```
+
+| Sectors | Content |
+|---------|---------|
+| 0 | MBR — Stage 1 (512 bytes) |
+| 1–16 | Stage 2 (up to 8 KB) |
+| 17+ | Flat kernel binary (`nklegacy.bin`) |
+
+The flat binary is produced from the ELF by `objcopy -O binary build/nklegacy.elf build/nklegacy.bin` and contains only the loadable sections starting at 0x100000. Stage 2 reads up to 128 sectors (64 KB) from sector 18 onward — note that Stage 2's disk-read code uses **sector 18** (CHS sector 18 = zero-indexed offset 17), matching the `seek=17` in the Makefile.
+
+<Note>
+  `make run` builds the GRUB ISO (`build/nklegacy.iso`) and boots it with `qemu-system-i386 -cdrom`. This path is recommended for development because GRUB provides a full Multiboot environment, accurate memory maps, and faster iteration — no floppy emulation quirks. Use `make run-bootman` to test the NKBootman floppy path specifically.
+</Note>

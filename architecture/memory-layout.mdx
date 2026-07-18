@@ -1,0 +1,128 @@
+---
+title: "NKLegacy x86 Memory Map and Linker Layout"
+sidebarTitle: "Memory Layout"
+description: "The physical memory map used by NKLegacy: bootloader load addresses, kernel placement at 1 MB, linker script sections, and the NKFS data pool."
+---
+
+NKLegacy targets the classic x86 real-mode / protected-mode physical memory map. Everything below 640 KB (0xA0000) is available for bootloader code, stacks, and temporary buffers; the region from 0xA0000 to 0xFFFFF is reserved for video memory and BIOS ROM. The kernel itself is linked and loaded at exactly 1 MB (0x100000), safely above the reserved zone, and its section layout is fixed at build time by `ntoskrnl/linker.ld`.
+
+## Physical Memory Map
+
+```text
+Address Range          Size       Contents
+─────────────────────────────────────────────────────────────────
+0x00000 – 0x003FF      1 KB       IVT — Real Mode Interrupt Vector Table
+0x00400 – 0x004FF      256 B      BIOS Data Area (BDA)
+0x07C00 – 0x07DFF      512 B      Stage 1 MBR (NKBootman, loaded by BIOS)
+0x07E00 – 0x0FDFF      8 KB       Stage 2 loader (NKBootman, loaded by Stage 1)
+0x08000 – 0x08FFF    (grows ↓)    Real-mode stack (SP starts at 0x7C00 in Stage 1)
+0x09000                           Stack top for Multiboot / Stage 2 32-bit entry
+0x10000 – 0x1FFFF     64 KB       Temporary kernel load buffer (Stage 2 only)
+0x0A0000 – 0x0BFFFF  128 KB       Video RAM (VGA, EGA, etc.)
+0x0B8000                          VGA text-mode framebuffer (80×25, 16-colour)
+0x0C0000 – 0x0FFFFF  256 KB       ROM / BIOS expansion area (reserved)
+0x100000               —          _kernel_start: kernel load address (1 MB)
+0x100000 + image size  —          _kernel_end (computed by linker)
+```
+
+The VGA text buffer at `0xB8000` is mapped directly by `vga_clear()` and `vga_print()` as a bare pointer; no memory-management layer is involved.
+
+## Linker Script — `ntoskrnl/linker.ld`
+
+The linker script sets the virtual-address origin to `0x100000` and lays out five sections, each aligned to a 4-byte or 4 KB boundary:
+
+```c
+/* NKLegacy Kernel Linker Script */
+/* Kernel is loaded at 1MB (0x100000) */
+
+ENTRY(_start)
+
+SECTIONS
+{
+    . = 0x100000;
+
+    _kernel_start = .;
+
+    /* Multiboot header must be within first 8KB */
+    .multiboot ALIGN(4) :
+    {
+        *(.multiboot)
+    }
+
+    .text ALIGN(4K) :
+    {
+        *(.text)
+        *(.text.*)
+    }
+
+    .rodata ALIGN(4K) :
+    {
+        *(.rodata)
+        *(.rodata.*)
+    }
+
+    .data ALIGN(4K) :
+    {
+        *(.data)
+        *(.data.*)
+    }
+
+    .bss ALIGN(4K) :
+    {
+        _bss_start = .;
+        *(COMMON)
+        *(.bss)
+        *(.bss.*)
+        _bss_end = .;
+    }
+
+    _kernel_end = .;
+
+    /* Discard unnecessary sections */
+    /DISCARD/ :
+    {
+        *(.comment)
+        *(.note.*)
+        *(.eh_frame)
+    }
+}
+```
+
+### Section Descriptions
+
+| Section | Alignment | Contents |
+|---------|-----------|---------|
+| `.multiboot` | 4 bytes | Multiboot magic, flags, checksum — must be within the first 8 KB of the image |
+| `.text` | 4 KB | All executable code (`*(.text)` and `*(.text.*)`) |
+| `.rodata` | 4 KB | Read-only data: string literals, `const` globals |
+| `.data` | 4 KB | Initialized read/write globals |
+| `.bss` | 4 KB | Zero-initialized globals and `COMMON` symbols; not stored in the ELF file |
+
+The `.multiboot` section is placed **before** `.text` and given only 4-byte alignment rather than 4 KB so that the three-dword Multiboot header (12 bytes) lands within the first 8 KB of the image, satisfying the Multiboot specification. The `_kernel_start` and `_kernel_end` symbols bracket the entire image and can be used for size calculations.
+
+The `/DISCARD/` block strips `.comment` (GCC version strings), `.note.*` (build ID notes), and `.eh_frame` (C++ exception unwinding data) from the output — none of these are needed in a freestanding kernel.
+
+## NKFS Data Pool (`.bss`)
+
+The NKFS in-memory filesystem allocates all its storage as static arrays, which the linker places in `.bss`:
+
+```c
+#define MAX_NODES       256
+#define DATA_POOL_SIZE  (512 * 1024)   /* 512 KB */
+
+static nkfs_node_t  node_pool[MAX_NODES];   /* 256 file/directory nodes */
+static uint8_t      data_pool[DATA_POOL_SIZE];  /* 512 KB file data */
+```
+
+Because these are zero-initialized globals they live in `.bss` and occupy no space in the ELF file on disk. The bootloader or GRUB zeroes the BSS range between `_bss_start` and `_bss_end` before calling `_start`, so `nkfs_init()` sees clean storage and merely sets its allocation counters to zero before creating the root node.
+
+<Note>
+  The kernel is compiled with `-m32 -ffreestanding -nostdlib -nostdinc`. There is no heap and no `malloc`; every data structure in NKLegacy uses static allocation. All memory management is resolved entirely at link time — the linker script and section sizes determine the complete memory footprint before the kernel ever runs.
+</Note>
+
+## Stack Placement
+
+Two distinct stacks exist during the boot sequence:
+
+- **Real-mode stack (Stage 1 / Stage 2):** `SP` is initialized to `0x7C00` in Stage 1, growing downward into low conventional memory. Stage 2 temporarily sets `ESP` to `0x90000` after entering protected mode.
+- **Kernel stack (Multiboot path):** `boot.asm` declares a 16 KB `resb 16384` buffer in `.bss` labelled `stack_bottom` / `stack_top`. `_start` sets `ESP = stack_top` before calling `kmain`, so the kernel stack sits entirely within the kernel image's `.bss` section above 0x100000.

@@ -1,0 +1,182 @@
+---
+title: "Kernel Panic and Blue Screen of Death in NKLegacy"
+sidebarTitle: "Panic & BSOD"
+description: "How NKLegacy handles unrecoverable kernel errors: kernel_panic halts with a message, and bsod switches the VGA to blue and displays an NT-style error screen."
+---
+
+NKLegacy provides two error-halt mechanisms — `kernel_panic` for generic fatal errors and `bsod` for an NT-style Blue Screen of Death — both of which permanently halt the CPU. Neither function returns. They are the correct response to any condition from which the kernel cannot safely recover, such as a corrupted data structure, a failed hardware initialization, or an unhandled exception.
+
+<Warning>
+Both `kernel_panic` and `bsod` disable interrupts with `cli` and enter an infinite `hlt` loop. The system **cannot recover** after either is called. A hard reboot (or VM reset) is required.
+</Warning>
+
+---
+
+## `kernel_panic`
+
+Source: `ntoskrnl/kernel/panic.h` / `ntoskrnl/kernel/panic.c`
+
+```c
+void kernel_panic(const char *msg);
+```
+
+The general-purpose fatal error function. It:
+
+1. Executes `cli` to disable hardware interrupts immediately.
+2. Writes the message to COM1 serial (`*** KERNEL PANIC: <msg> ***`) so it is captured even if VGA is broken.
+3. Calls `bsod(msg)` to display the blue screen on the VGA console.
+4. Enters a `for(;;) hlt` loop, permanently halting the CPU.
+
+### Implementation
+
+```c
+void kernel_panic(const char *msg) {
+    /* Disable interrupts */
+    __asm__ volatile("cli");
+
+    /* Output to serial for debugging */
+    serial_print(COM1, "\n*** KERNEL PANIC: ");
+    serial_print(COM1, msg);
+    serial_print(COM1, " ***\n");
+
+    /* Display BSOD */
+    bsod(msg);
+
+    /* Halt forever */
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+```
+
+### Usage
+
+```c
+#include "kernel/panic.h"
+
+/* Assert that the IDT was loaded successfully */
+if (!idt_loaded) {
+    kernel_panic("IDT load failed");
+}
+
+/* Detect NULL pointer before dereferencing */
+if (!node) {
+    kernel_panic("linked list node is NULL");
+}
+```
+
+---
+
+## `bsod`
+
+Source: `ntoskrnl/kernel/bsod.h` / `ntoskrnl/kernel/bsod.c`
+
+```c
+void bsod(const char *message);
+```
+
+Displays a full-screen NT-style Blue Screen of Death on the VGA text console, then halts. The screen is set to VGA color `0x1F` — white text (foreground `0xF`) on a blue background (background `0x1`) — matching the classic Windows NT stop screen appearance.
+
+The displayed output follows the NT stop screen layout:
+
+```text
+
+  *** STOP ***
+
+  A problem has been detected and NKLegacy has been shut down to prevent
+  damage to your computer.
+
+  Error: <message>
+
+  If this is the first time you've seen this Stop error screen,
+  restart your computer. If this screen appears again, follow
+  these steps:
+
+  Check to make sure any new hardware or software is properly installed.
+  If problems continue, disable or remove any newly installed hardware
+  or software.
+
+  Technical Information:
+
+  *** KERNEL_PANIC
+```
+
+### Implementation
+
+```c
+void bsod(const char *message) {
+    /* Classic NT blue screen: white on blue */
+    vga_set_color(0x1F);
+    vga_clear();
+
+    vga_print("\n");
+    vga_print("  *** STOP ***\n\n");
+    vga_print("  A problem has been detected and NKLegacy has been shut down to prevent\n");
+    vga_print("  damage to your computer.\n\n");
+
+    if (message) {
+        vga_print("  Error: ");
+        vga_print(message);
+        vga_print("\n\n");
+    }
+
+    vga_print("  If this is the first time you've seen this Stop error screen,\n");
+    vga_print("  restart your computer. If this screen appears again, follow\n");
+    vga_print("  these steps:\n\n");
+    vga_print("  Check to make sure any new hardware or software is properly installed.\n");
+    vga_print("  If problems continue, disable or remove any newly installed hardware\n");
+    vga_print("  or software.\n\n");
+
+    vga_print("  Technical Information:\n\n");
+    vga_print("  *** KERNEL_PANIC\n\n");
+
+    /* Halt */
+    __asm__ volatile("cli");
+    for (;;) {
+        __asm__ volatile("hlt");
+    }
+}
+```
+
+### Usage
+
+```c
+#include "kernel/bsod.h"
+
+/* Trigger an NT-style stop screen for a driver-level fault */
+bsod("IRQL_NOT_LESS_OR_EQUAL");
+
+/* Surface a memory management failure */
+bsod("PAGE_FAULT_IN_NONPAGED_AREA");
+```
+
+---
+
+## When to Use Each
+
+<CardGroup cols={2}>
+  <Card title="kernel_panic" icon="triangle-exclamation">
+    Use for **internal assertions and unexpected kernel states** during development — NULL pointer dereferences, corrupted data structure invariants, failed initialization steps, or logic paths that should be unreachable. The message is written to serial first, which is valuable when VGA output is not yet functional.
+  </Card>
+  <Card title="bsod" icon="display">
+    Use to surface **fatal hardware or driver failures** to the user in an NT-familiar way. Appropriate when the failure is meaningful to an end user — for example, a missing required device, an ATA controller fault, or an irrecoverable filesystem error. `kernel_panic` calls `bsod` internally, so you rarely need to call `bsod` directly.
+  </Card>
+</CardGroup>
+
+### Relationship between the two
+
+`kernel_panic` is a superset of `bsod` — it adds a serial log entry before delegating to `bsod` for the visual output. For any situation where you want both the serial trace and the blue screen, call `kernel_panic`. Call `bsod` directly only when you explicitly want the NT-style screen without the serial preamble or when `kernel_panic` itself would be circular.
+
+```text
+kernel_panic(msg)
+  │
+  ├─ cli
+  ├─ serial_print("*** KERNEL PANIC: <msg> ***")
+  ├─ bsod(msg)
+  │     ├─ vga_set_color(0x1F)
+  │     ├─ vga_clear()
+  │     ├─ vga_print(NT stop screen text)
+  │     ├─ cli
+  │     └─ for(;;) hlt
+  └─ for(;;) hlt   ← never reached (bsod never returns)
+```

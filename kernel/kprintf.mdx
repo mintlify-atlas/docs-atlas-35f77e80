@@ -1,0 +1,205 @@
+---
+title: "kprintf: Formatted Kernel Output to VGA and Serial"
+sidebarTitle: "kprintf"
+description: "Reference for kprintf, the NKLegacy formatted print function. Documents all supported format specifiers and how output is mirrored to both VGA and COM1 serial."
+---
+
+`kprintf` is NKLegacy's kernel-level formatted print function. Every call outputs simultaneously to both the VGA text console and the COM1 serial port (`0x3F8`), making it the primary debug channel during kernel development. There is no buffering or locking — output is written character-by-character in the order it is produced.
+
+## Function Signature
+
+```c
+void kprintf(const char *fmt, ...);
+```
+
+Declared in `ntoskrnl/kernel/kprintf.h` and implemented in `ntoskrnl/kernel/kprintf.c`. Include the header anywhere you need formatted output:
+
+```c
+#include "kernel/kprintf.h"
+```
+
+---
+
+## Format Specifiers
+
+<Note>
+`kprintf` does **not** support padding, field-width specifiers, precision, length modifiers (`%ld`, `%zu`, etc.), or floating-point types. It is intentionally minimal for a freestanding kernel environment where the C standard library is unavailable.
+</Note>
+
+<CardGroup cols={2}>
+  <Card title="%s — string" icon="text">
+    Prints a null-terminated C string. If the pointer is `NULL`, prints the literal text `(null)` instead of faulting.
+  </Card>
+  <Card title="%d — signed integer" icon="hashtag">
+    Prints a signed decimal `int`. Negative values are preceded by a minus sign (`-`).
+  </Card>
+  <Card title="%u — unsigned integer" icon="hashtag">
+    Prints an unsigned decimal `unsigned int`. Use this for tick counters, sizes, and other non-negative quantities.
+  </Card>
+  <Card title="%x — hexadecimal" icon="code">
+    Prints an unsigned `int` in uppercase hexadecimal, always prefixed with `0x` (e.g., `0x1F4`).
+  </Card>
+  <Card title="%p — pointer" icon="link">
+    Identical to `%x` — the value is formatted as an unsigned hex integer with a `0x` prefix. Useful for printing addresses.
+  </Card>
+  <Card title="%c — character" icon="font">
+    Prints a single `char`.
+  </Card>
+  <Card title="%% — literal percent" icon="percent">
+    Emits a single `%` character in the output.
+  </Card>
+</CardGroup>
+
+---
+
+## Dual Output Behaviour
+
+Internally, `kprintf` routes every character through the private `kput` helper:
+
+```c
+static void kput(char c) {
+    if (c == '\n') {
+        serial_putchar(COM1, '\r');   /* prepend CR for CRLF on terminals */
+    }
+    vga_putchar(c);
+    serial_putchar(COM1, c);
+}
+```
+
+Key behaviours:
+
+- **VGA**: Each character is written at the current cursor position using `vga_putchar`. The VGA driver advances the cursor and scrolls when the bottom row is reached.
+- **Serial (COM1)**: Each character is sent to `0x3F8`. Newline characters (`\n`) automatically emit a carriage return (`\r`) before the newline so that serial terminals receive proper CRLF line endings.
+- **Order**: VGA and serial writes happen within the same `kput` call, so both outputs stay in sync even if the kernel crashes mid-print.
+
+<Tip>
+When running NKLegacy in QEMU with `make run`, all `kprintf` output is visible on the host terminal via the emulated serial port. This makes serial output the most reliable crash-debugging channel — it survives situations where VGA scrolling or state is corrupted.
+</Tip>
+
+---
+
+## Usage Examples
+
+### Basic string and integer
+
+```c
+kprintf("tick: %u\n", pit_get_ticks());
+```
+
+```text
+tick: 1024
+```
+
+### Hexadecimal address
+
+```c
+kprintf("entry: %x\n", entry_point);
+```
+
+```text
+entry: 0x100000
+```
+
+### Multiple arguments
+
+```c
+kprintf("[%s] loaded at %x, size %u\n", name, addr, size);
+```
+
+```text
+[kernel] loaded at 0x100000, size 49152
+```
+
+### NULL pointer guard
+
+```c
+const char *label = NULL;
+kprintf("label=%s\n", label);
+```
+
+```text
+label=(null)
+```
+
+### Signed integer
+
+```c
+int delta = -42;
+kprintf("delta: %d\n", delta);
+```
+
+```text
+delta: -42
+```
+
+### Single character
+
+```c
+kprintf("magic byte: %c\n", 'K');
+```
+
+```text
+magic byte: K
+```
+
+---
+
+## Internal Implementation Reference
+
+The full `kprintf.c` source shows each specifier's handling path:
+
+```c
+void kprintf(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+
+    while (*fmt) {
+        if (*fmt == '%') {
+            fmt++;
+            switch (*fmt) {
+                case 's': {
+                    const char *s = va_arg(args, const char *);
+                    if (!s) s = "(null)";
+                    while (*s) kput(*s++);
+                    break;
+                }
+                case 'd': {
+                    int val = va_arg(args, int);
+                    print_int(val);
+                    break;
+                }
+                case 'u': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    print_uint(val);
+                    break;
+                }
+                case 'x':
+                case 'p': {
+                    unsigned int val = va_arg(args, unsigned int);
+                    print_hex(val);
+                    break;
+                }
+                case 'c': {
+                    char c = (char)va_arg(args, int);
+                    kput(c);
+                    break;
+                }
+                case '%':
+                    kput('%');
+                    break;
+                default:
+                    kput('%');
+                    kput(*fmt);
+                    break;
+            }
+        } else {
+            kput(*fmt);
+        }
+        fmt++;
+    }
+
+    va_end(args);
+}
+```
+
+Unknown specifiers (the `default` branch) are passed through literally — `kprintf("%q", ...)` would emit `%q` verbatim rather than silently discarding the character.

@@ -1,0 +1,282 @@
+---
+title: "Interrupt Handling: ISR Stubs and IRQ Dispatch"
+sidebarTitle: "Interrupts"
+description: "How NKLegacy handles x86 exceptions and hardware IRQs through assembly ISR stubs, the 8259 PIC, and C-level interrupt dispatch via idt_register_handler."
+---
+
+NKLegacy handles all 256 x86 interrupt vectors through assembly ISR stubs in `isr.asm` that save CPU state, call a C dispatch function, then restore state and return with `iret`. Hardware IRQs additionally require the 8259 Programmable Interrupt Controller (PIC) to be remapped so that IRQ lines 0–15 do not collide with the reserved CPU exception vectors 0–31.
+
+<Warning>
+Always call `pic_send_eoi(irq)` at the end of every hardware IRQ handler (vectors 32–47). Failing to send an End-of-Interrupt signal masks all further interrupts on that IRQ line — the system will appear to stop receiving timer ticks, keyboard input, or other hardware events.
+</Warning>
+
+## Assembly ISR Stubs
+
+Source: `ntoskrnl/arch/i386/isr.asm`
+
+Two NASM macros generate the per-vector entry points that the IDT points to. The macros normalize the stack layout so that a single common stub can handle both exception types.
+
+### `ISR_NOERRCODE` — exceptions without an error code
+
+Used for exceptions where the CPU does **not** automatically push an error code (e.g., Division By Zero, Invalid Opcode, Page Fault is the exception — see table below). The macro pushes a dummy `0` so the stack layout matches `registers_t` exactly.
+
+```asm
+%macro ISR_NOERRCODE 1
+global isr%1
+isr%1:
+    push dword 0            ; Dummy error code
+    push dword %1           ; Interrupt number
+    jmp isr_common_stub
+%endmacro
+```
+
+### `ISR_ERRCODE` — exceptions that push an error code
+
+Used for exceptions where the CPU already pushed a non-zero error code onto the stack (e.g., Double Fault, General Protection Fault, Page Fault). The macro only pushes the interrupt number — the CPU-pushed error code is already in place.
+
+```asm
+%macro ISR_ERRCODE 1
+global isr%1
+isr%1:
+    ; CPU already pushed error code
+    push dword %1           ; Interrupt number
+    jmp isr_common_stub
+%endmacro
+```
+
+### Exception vector table
+
+| Vector | Name | Stub type |
+|---|---|---|
+| 0 | Division By Zero | `ISR_NOERRCODE` |
+| 1 | Debug | `ISR_NOERRCODE` |
+| 2 | Non-Maskable Interrupt | `ISR_NOERRCODE` |
+| 3 | Breakpoint | `ISR_NOERRCODE` |
+| 4 | Overflow | `ISR_NOERRCODE` |
+| 5 | Bound Range Exceeded | `ISR_NOERRCODE` |
+| 6 | Invalid Opcode | `ISR_NOERRCODE` |
+| 7 | Device Not Available | `ISR_NOERRCODE` |
+| 8 | Double Fault | `ISR_ERRCODE` |
+| 9 | Coprocessor Segment Overrun | `ISR_NOERRCODE` |
+| 10 | Invalid TSS | `ISR_ERRCODE` |
+| 11 | Segment Not Present | `ISR_ERRCODE` |
+| 12 | Stack-Segment Fault | `ISR_ERRCODE` |
+| 13 | General Protection Fault | `ISR_ERRCODE` |
+| 14 | Page Fault | `ISR_ERRCODE` |
+| 16 | x87 Floating-Point Exception | `ISR_NOERRCODE` |
+| 17 | Alignment Check | `ISR_ERRCODE` |
+| 18 | Machine Check | `ISR_NOERRCODE` |
+| 19 | SIMD Floating-Point Exception | `ISR_NOERRCODE` |
+| 20 | Virtualization Exception | `ISR_NOERRCODE` |
+| 30 | Security Exception | `ISR_NOERRCODE` |
+
+### Common ISR stub
+
+After pushing the interrupt number, all exception stubs jump to `isr_common_stub`, which saves the full CPU context, switches to the kernel data segment, then calls the C function `isr_handler(registers_t *)`.
+
+```asm
+extern isr_handler
+
+isr_common_stub:
+    pusha               ; Push edi, esi, ebp, esp, ebx, edx, ecx, eax
+
+    mov ax, ds
+    push eax            ; Save data segment
+
+    mov ax, 0x10        ; Load kernel data segment
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    push esp            ; Pass pointer to registers_t
+    call isr_handler
+    add esp, 4
+
+    pop eax             ; Restore data segment
+    mov ds, ax
+    mov es, ax
+    mov fs, ax
+    mov gs, ax
+
+    popa                ; Restore registers
+    add esp, 8          ; Clean up int_no and err_code
+    iret
+```
+
+Hardware IRQs follow an identical `irq_common_stub` that calls `irq_handler` instead. The C `irq_handler` sends EOI to the 8259 PIC automatically before dispatching the registered callback.
+
+### Hardware IRQ stubs (vectors 32–47)
+
+```asm
+%macro IRQ 2
+global irq%1
+irq%1:
+    push dword 0            ; Dummy error code
+    push dword %2           ; Interrupt number (32+)
+    jmp irq_common_stub
+%endmacro
+
+IRQ 0,  32      ; PIT Timer
+IRQ 1,  33      ; Keyboard
+IRQ 2,  34      ; Cascade
+IRQ 3,  35      ; COM2
+IRQ 4,  36      ; COM1
+IRQ 5,  37      ; LPT2
+IRQ 6,  38      ; Floppy
+IRQ 7,  39      ; LPT1 / Spurious
+IRQ 8,  40      ; CMOS RTC
+IRQ 9,  41      ; Free
+IRQ 10, 42      ; Free
+IRQ 11, 43      ; Free
+IRQ 12, 44      ; PS/2 Mouse
+IRQ 13, 45      ; FPU
+IRQ 14, 46      ; Primary ATA
+IRQ 15, 47      ; Secondary ATA
+```
+
+---
+
+## 8259 PIC — Programmable Interrupt Controller
+
+Source: `ntoskrnl/driver/pic/pic.h` / `ntoskrnl/driver/pic/pic.c`
+
+The IBM PC-compatible 8259 PIC originally maps IRQ0–IRQ7 to CPU vectors 0x00–0x07, which directly conflicts with the CPU's own exception vectors. `pic_init()` reprograms both the master and slave PICs to remap these lines out of the exception range.
+
+| IRQ lines | Default vectors | Remapped vectors |
+|---|---|---|
+| IRQ 0–7 (master PIC) | 0x00–0x07 | 0x20–0x27 (32–39) |
+| IRQ 8–15 (slave PIC) | 0x70–0x77 | 0x28–0x2F (40–47) |
+
+### Port constants
+
+```c
+#define PIC1_CMD    0x20   /* Master PIC command port */
+#define PIC1_DATA   0x21   /* Master PIC data/mask port */
+#define PIC2_CMD    0xA0   /* Slave PIC command port */
+#define PIC2_DATA   0xA1   /* Slave PIC data/mask port */
+
+#define PIC_EOI     0x20   /* End-of-interrupt command byte */
+```
+
+### `pic_init`
+
+```c
+void pic_init(void);
+```
+
+Sends the ICW1–ICW4 initialization sequence to both PICs in cascade mode, programs the vector offsets to 0x20 (master) and 0x28 (slave), then restores the IRQ masks that were active before initialization.
+
+### `pic_send_eoi`
+
+```c
+void pic_send_eoi(uint8_t irq);
+```
+
+Sends an End-of-Interrupt command to the appropriate PIC(s). If `irq >= 8`, the slave PIC receives EOI first (via `PIC2_CMD`), then the master PIC receives EOI (via `PIC1_CMD`). For `irq < 8`, only the master PIC is signalled.
+
+<ParamField path="irq" type="uint8_t" required>
+  The IRQ line number (0–15), **not** the IDT vector number. For example, the keyboard is IRQ 1 (IDT vector 33).
+</ParamField>
+
+### `pic_set_mask` / `pic_clear_mask`
+
+```c
+void pic_set_mask(uint8_t irq);
+void pic_clear_mask(uint8_t irq);
+```
+
+Set or clear the mask bit for a specific IRQ line in the PIC's Interrupt Mask Register. A masked IRQ line is silenced — the PIC will not raise that interrupt even if the hardware asserts it.
+
+<ParamField path="irq" type="uint8_t" required>
+  IRQ line (0–15). Lines 8–15 are automatically routed to the slave PIC's mask register.
+</ParamField>
+
+---
+
+## Port I/O Helpers
+
+Source: `ntoskrnl/arch/i386/io.h`
+
+All PIC and hardware driver code uses the following inline assembly wrappers for CPU I/O port access. Because these are `static inline`, they compile to a single instruction at each call site with zero function-call overhead.
+
+```c
+/* Output a byte to an I/O port */
+static inline void outb(uint16_t port, uint8_t val) {
+    __asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/* Input a byte from an I/O port */
+static inline uint8_t inb(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* Output a word to an I/O port */
+static inline void outw(uint16_t port, uint16_t val) {
+    __asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port));
+}
+
+/* Input a word from an I/O port */
+static inline uint16_t inw(uint16_t port) {
+    uint16_t ret;
+    __asm__ volatile("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+
+/* Wait a very small amount of time (1 to 4 microseconds) */
+static inline void io_wait(void) {
+    outb(0x80, 0);
+}
+```
+
+`io_wait()` writes a dummy byte to I/O port `0x80` (a POST diagnostic port on PC hardware) to introduce a small pause between PIC command writes, which some older hardware requires.
+
+---
+
+## Registering a Custom IRQ Handler
+
+The steps below show the complete pattern for adding a new hardware IRQ handler. The keyboard driver (`ntoskrnl/driver/keyboard/keyboard.c`) follows exactly this pattern using IRQ line 1 (IDT vector 33).
+
+<Steps>
+  <Step title="Write a handler function">
+    The handler must match the `isr_handler_t` signature — it receives a pointer to the saved CPU state.
+
+    ```c
+    #include "arch/i386/idt.h"
+    #include "arch/i386/io.h"
+    #include "driver/pic/pic.h"
+
+    static void my_irq_handler(registers_t *regs) {
+        (void)regs;  /* suppress unused warning if regs not needed */
+
+        /* --- Handle the hardware event here --- */
+        uint8_t data = inb(0x60);   /* example: read from PS/2 data port */
+
+        /* Always send EOI so the PIC allows future interrupts on this line */
+        pic_send_eoi(1);   /* pass the IRQ line number, not the vector */
+    }
+    ```
+  </Step>
+  <Step title="Register the handler">
+    Map the handler to the correct IDT vector. Hardware IRQ `n` maps to IDT vector `32 + n`.
+
+    ```c
+    void my_driver_init(void) {
+        /* IRQ 1 (keyboard) -> IDT vector 33 */
+        idt_register_handler(33, my_irq_handler);
+
+        /* Optionally unmask the IRQ line in the PIC */
+        pic_clear_mask(1);
+    }
+    ```
+  </Step>
+  <Step title="Ensure boot order">
+    `pic_init()` and `idt_init()` must both be called before `my_driver_init()`. Interrupts must be enabled (the boot path calls `sti`) for handlers to fire.
+  </Step>
+</Steps>
+
+<Info>
+The C `irq_handler` function in `idt.c` already sends PIC EOI automatically for vectors 32–47. However, it is also good practice to call `pic_send_eoi` explicitly from your own handler if you need precise control over when EOI is issued (e.g., before re-enabling interrupts inside the handler).
+</Info>

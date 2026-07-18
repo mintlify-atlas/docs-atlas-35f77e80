@@ -1,0 +1,161 @@
+---
+title: "PS/2 Keyboard Driver: Scancode Set 1 Input"
+sidebarTitle: "Keyboard"
+description: "Reference for NKLegacy's PS/2 keyboard driver: IRQ1 scancode handling, scancode-to-ASCII translation, shift key support, and reading input via keyboard_getchar."
+---
+
+NKLegacy implements a PS/2 keyboard driver that handles IRQ 1 (INT `0x21`), reads scancodes from port `0x60`, translates them using a Scancode Set 1 lookup table, and stores the resulting ASCII characters in a 256-byte circular buffer for consumption by the shell. The driver is interrupt-driven: every keypress fires the `keyboard_callback` ISR, which translates and buffers the character without any polling overhead in the main loop.
+
+## API Reference
+
+### `void keyboard_init(void)`
+
+Registers the keyboard IRQ handler by calling `idt_register_handler(33, keyboard_callback)`, hooking INT `0x21` (IRQ 1) to the internal scancode handler. No hardware reset or port initialization is performed — the PS/2 controller is left in its power-on state.
+
+```c
+serial_print(COM1, "NKLegacy: Initializing keyboard...\n");
+keyboard_init();
+```
+
+This must be called after `pic_init()` (so IRQ vectors are remapped to `0x20–0x2F`) and before `sti` is executed.
+
+---
+
+### `char keyboard_getchar(void)`
+
+Non-blocking read from the internal circular key buffer. Returns the oldest buffered ASCII character if one is available, otherwise returns `0` immediately.
+
+The buffer holds up to 255 characters (`KB_BUF_SIZE` = 256, with one slot reserved to distinguish empty from full). If the buffer overflows (i.e., the shell is not draining it fast enough), new characters are silently dropped in the ISR.
+
+```c
+char c = keyboard_getchar();
+if (c) {
+    vga_putchar(c);        /* echo to screen */
+    process_key(c);
+}
+```
+
+<Note>
+  `keyboard_getchar` is non-blocking — it returns `0` immediately when no key is pending. Callers must poll it in a loop. The shell in `cmd.c` uses `__asm__ volatile("pause")` between poll iterations to reduce CPU contention and give the CPU a hint that it is in a spin-wait loop.
+</Note>
+
+## Scancode Set 1
+
+The PC keyboard reports key events as scancodes on I/O port `0x60`. NKLegacy uses Scancode Set 1 (the legacy XT set), which all modern PS/2 keyboards emulate.
+
+**Make/break encoding:**
+
+- **Make code** (key down): value is less than `0x80`. The scancode is used as an index into the `scancode_ascii` or `scancode_ascii_shift` lookup table.
+- **Break code** (key up): value has bit 7 set — i.e., `scancode = make_code | 0x80`. The driver checks `scancode & 0x80` and discards break codes (except for shift key tracking).
+
+### Shift Key Support
+
+The driver maintains a `shift_held` flag:
+
+- **Left Shift press** (`0x2A`) and **Right Shift press** (`0x36`) set `shift_held = 1`.
+- **Left Shift release** (`0xAA`) and **Right Shift release** (`0xB6`) clear `shift_held = 0`.
+- When `shift_held` is non-zero the `scancode_ascii_shift` table is used instead of `scancode_ascii`, producing uppercase letters and shifted symbols (`!@#$%^&*` etc.).
+
+### Lookup Table Summary
+
+| Key | Unshifted | Shifted |
+|---|---|---|
+| `1`–`9`, `0` | `1`–`9`, `0` | `!`, `@`, `#`, `$`, `%`, `^`, `&`, `*`, `(`, `)` |
+| `-` | `-` | `_` |
+| `=` | `=` | `+` |
+| `[`, `]` | `[`, `]` | `{`, `}` |
+| `;` | `;` | `:` |
+| `'` | `'` | `"` |
+| `` ` `` | `` ` `` | `~` |
+| `\` | `\` | `\|` |
+| `,`, `.`, `/` | `,`, `.`, `/` | `<`, `>`, `?` |
+| Letters | Lowercase | Uppercase |
+| Space | ` ` | ` ` |
+| Enter | `\n` | `\n` |
+| Backspace | `\b` | `\b` |
+| Tab | `\t` | `\t` |
+| Escape | `0x1B` | `0x1B` |
+| F1–F12, Numlock, Scroll Lock, Caps Lock | `0` (ignored) | `0` (ignored) |
+
+## Shell Integration
+
+The shell loop in `cmd.c` polls `keyboard_getchar()` on every iteration and falls back to `serial_getchar(COM1)` if no PS/2 key is available. This allows the same shell to accept input from both input sources simultaneously:
+
+```c
+for (;;) {
+    char c = keyboard_getchar();
+    if (!c)
+        c = serial_getchar(COM1);
+
+    if (c) {
+        if (c == '\n' || c == '\r') {
+            vga_putchar('\n');
+            cmd_buf[cmd_i] = '\0';
+            break;
+        } else if (c == '\b') {
+            if (cmd_i > 0) {
+                cmd_i--;
+                vga_putchar('\b');
+                vga_putchar(' ');
+                vga_putchar('\b');
+            }
+        } else {
+            if (cmd_i < 127) {
+                cmd_buf[cmd_i++] = c;
+                vga_putchar(c);
+            }
+        }
+    } else {
+        __asm__ volatile("pause");
+    }
+}
+```
+
+Backspace is handled correctly: the shell decrements the buffer index and uses `vga_putchar('\b')` + `vga_putchar(' ')` + `vga_putchar('\b')` to erase the character visually on screen (move back, overwrite with space, move back again).
+
+## Usage Example: Reading a Line of Input
+
+```c
+#include "driver/keyboard/keyboard.h"
+#include "driver/serial/serial.h"
+#include "driver/vga/vga.h"
+
+/**
+ * Read up to (max_len - 1) characters into buf, stopping on Enter.
+ * Echoes each character to the VGA screen.
+ * Returns when the user presses Enter.
+ */
+void read_line(char *buf, int max_len) {
+    int i = 0;
+
+    for (;;) {
+        /* Poll keyboard, fall back to serial */
+        char c = keyboard_getchar();
+        if (!c) c = serial_getchar(COM1);
+
+        if (!c) {
+            __asm__ volatile("pause");
+            continue;
+        }
+
+        if (c == '\n' || c == '\r') {
+            buf[i] = '\0';
+            vga_putchar('\n');
+            return;
+        }
+
+        if (c == '\b' && i > 0) {
+            i--;
+            vga_putchar('\b');
+            vga_putchar(' ');
+            vga_putchar('\b');
+            continue;
+        }
+
+        if (i < max_len - 1) {
+            buf[i++] = c;
+            vga_putchar(c);
+        }
+    }
+}
+```

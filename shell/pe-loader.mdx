@@ -1,0 +1,256 @@
+---
+title: "PE Loader: Executing PE32 Binaries in the Kernel"
+sidebarTitle: "PE Loader"
+description: "How NKLegacy's PE loader validates and executes PE32 binaries in-kernel: MZ/PE signature checks, section mapping, and entry point invocation via pe_load_and_run."
+---
+
+NKLegacy includes a minimal PE32 loader that can validate and execute PE32 executables directly inside the kernel address space. It is used by the `run` shell command to execute binaries produced by [NKBuild](/shell/nkbuild). The loader is implemented in `ntoskrnl/exe/pe.c` and its types and public API are declared in `ntoskrnl/exe/pe.h`.
+
+<Warning>
+  The PE loader runs code at kernel ring 0 with full CPU privileges. There is no sandboxing, memory protection, or privilege separation. Only run binaries that were built by NKBuild or that you fully trust — a malicious or buggy entry point can corrupt or crash the entire kernel.
+</Warning>
+
+---
+
+## PE32 Format Overview
+
+NKLegacy's loader understands the standard PE32 on-disk layout:
+
+```text
+┌─────────────────────────────┐  offset 0x00
+│  IMAGE_DOS_HEADER           │  e_magic = 0x5A4D ("MZ")
+│  (e_lfanew → NT headers)    │
+├─────────────────────────────┤  offset e_lfanew
+│  IMAGE_NT_HEADERS32         │
+│  ├─ Signature (0x00004550)  │  "PE\0\0"
+│  ├─ IMAGE_FILE_HEADER       │  machine, section count, …
+│  └─ IMAGE_OPTIONAL_HEADER32 │  ImageBase, AddressOfEntryPoint, …
+├─────────────────────────────┤  immediately after NT headers
+│  IMAGE_SECTION_HEADER[n]    │  one entry per section
+├─────────────────────────────┤
+│  Section raw data           │  .text, .data, …
+└─────────────────────────────┘
+```
+
+---
+
+## Key Type Definitions
+
+All types are defined in `ntoskrnl/exe/pe.h`.
+
+### Constants
+
+```c
+#define IMAGE_DOS_SIGNATURE    0x5A4D      /* "MZ"     */
+#define IMAGE_NT_SIGNATURE     0x00004550  /* "PE\0\0" */
+#define IMAGE_SIZEOF_SHORT_NAME 8
+```
+
+### `IMAGE_DOS_HEADER`
+
+```c
+typedef struct _IMAGE_DOS_HEADER {
+    uint16_t e_magic;       /* Must equal IMAGE_DOS_SIGNATURE (0x5A4D) */
+    uint16_t e_cblp;
+    uint16_t e_cp;
+    uint16_t e_crlc;
+    uint16_t e_cparhdr;
+    uint16_t e_minalloc;
+    uint16_t e_maxalloc;
+    uint16_t e_ss;
+    uint16_t e_sp;
+    uint16_t e_csum;
+    uint16_t e_ip;
+    uint16_t e_cs;
+    uint16_t e_lfarlc;
+    uint16_t e_ovno;
+    uint16_t e_res[4];
+    uint16_t e_oemid;
+    uint16_t e_oeminfo;
+    uint16_t e_res2[10];
+    uint32_t e_lfanew;      /* Offset of IMAGE_NT_HEADERS32 from file start */
+} IMAGE_DOS_HEADER;
+```
+
+### `IMAGE_FILE_HEADER`
+
+```c
+typedef struct _IMAGE_FILE_HEADER {
+    uint16_t Machine;               /* 0x014C = i386 */
+    uint16_t NumberOfSections;
+    uint32_t TimeDateStamp;
+    uint32_t PointerToSymbolTable;
+    uint32_t NumberOfSymbols;
+    uint16_t SizeOfOptionalHeader;
+    uint16_t Characteristics;
+} IMAGE_FILE_HEADER;
+```
+
+### `IMAGE_OPTIONAL_HEADER32`
+
+```c
+typedef struct _IMAGE_OPTIONAL_HEADER32 {
+    uint16_t Magic;                  /* 0x010B = PE32 */
+    uint8_t  MajorLinkerVersion;
+    uint8_t  MinorLinkerVersion;
+    uint32_t SizeOfCode;
+    uint32_t SizeOfInitializedData;
+    uint32_t SizeOfUninitializedData;
+    uint32_t AddressOfEntryPoint;    /* RVA of the entry point function */
+    uint32_t BaseOfCode;
+    uint32_t BaseOfData;
+    uint32_t ImageBase;              /* Preferred load address */
+    uint32_t SectionAlignment;
+    uint32_t FileAlignment;
+    uint16_t MajorOperatingSystemVersion;
+    uint16_t MinorOperatingSystemVersion;
+    uint16_t MajorImageVersion;
+    uint16_t MinorImageVersion;
+    uint16_t MajorSubsystemVersion;
+    uint16_t MinorSubsystemVersion;
+    uint32_t Win32VersionValue;
+    uint32_t SizeOfImage;
+    uint32_t SizeOfHeaders;
+    uint32_t CheckSum;
+    uint16_t Subsystem;
+    uint16_t DllCharacteristics;
+    uint32_t SizeOfStackReserve;
+    uint32_t SizeOfStackCommit;
+    uint32_t SizeOfHeapReserve;
+    uint32_t SizeOfHeapCommit;
+    uint32_t LoaderFlags;
+    uint32_t NumberOfRvaAndSizes;
+    IMAGE_DATA_DIRECTORY DataDirectory[16];
+} IMAGE_OPTIONAL_HEADER32;
+```
+
+### `IMAGE_NT_HEADERS32`
+
+```c
+typedef struct _IMAGE_NT_HEADERS32 {
+    uint32_t              Signature;    /* IMAGE_NT_SIGNATURE */
+    IMAGE_FILE_HEADER     FileHeader;
+    IMAGE_OPTIONAL_HEADER32 OptionalHeader;
+} IMAGE_NT_HEADERS32;
+```
+
+### `IMAGE_SECTION_HEADER`
+
+```c
+typedef struct _IMAGE_SECTION_HEADER {
+    uint8_t  Name[IMAGE_SIZEOF_SHORT_NAME]; /* e.g. ".text\0\0\0" */
+    union {
+        uint32_t PhysicalAddress;
+        uint32_t VirtualSize;
+    } Misc;
+    uint32_t VirtualAddress;        /* RVA where the section is loaded */
+    uint32_t SizeOfRawData;         /* Bytes in the file (file-aligned) */
+    uint32_t PointerToRawData;      /* File offset of raw section data  */
+    uint32_t PointerToRelocations;
+    uint32_t PointerToLinenumbers;
+    uint16_t NumberOfRelocations;
+    uint16_t NumberOfLinenumbers;
+    uint32_t Characteristics;       /* Flags: executable, readable, …   */
+} IMAGE_SECTION_HEADER;
+```
+
+---
+
+## API Reference
+
+### `pe_load_and_run`
+
+```c
+int pe_load_and_run(void *file_buffer, uint32_t file_size);
+```
+
+Validates, maps, and executes a PE32 binary from a memory buffer. Returns `0` on success (after the entry point function returns). Returns `-1` on any validation failure, printing a diagnostic message via `kprintf`.
+
+**Parameters**
+
+| Parameter     | Description                                               |
+|---------------|-----------------------------------------------------------|
+| `file_buffer` | Pointer to the in-memory PE image (e.g. from NKBuild).   |
+| `file_size`   | Size of the image in bytes.                               |
+
+---
+
+## Validation Steps
+
+`pe_load_and_run` performs the following checks in order before executing any code:
+
+<Steps>
+  <Step title="Buffer size check">
+    Verifies that `file_buffer` is non-NULL and that `file_size >= sizeof(IMAGE_DOS_HEADER)`. Prints `PE: Invalid buffer size` and returns `-1` on failure.
+  </Step>
+  <Step title="MZ signature check">
+    Reads `dos_header->e_magic` and verifies it equals `IMAGE_DOS_SIGNATURE` (`0x5A4D`). Prints `PE: Invalid DOS signature (0x<val>)` on failure.
+  </Step>
+  <Step title="NT headers offset bounds check">
+    Verifies that `e_lfanew` is within the buffer and that `e_lfanew + sizeof(IMAGE_NT_HEADERS32)` does not exceed `file_size`. Prints `PE: Invalid NT headers offset` on failure.
+  </Step>
+  <Step title="PE signature check">
+    Reads `nt_headers->Signature` and verifies it equals `IMAGE_NT_SIGNATURE` (`0x00004550`). Prints `PE: Invalid NT signature (0x<val>)` on failure.
+  </Step>
+  <Step title="Machine type check">
+    Reads `FileHeader.Machine` and verifies it equals `0x014C` (i386). Prints `PE: Invalid Machine type (0x<val>). Only i386 supported.` on failure.
+  </Step>
+  <Step title="Section mapping">
+    Iterates over the `NumberOfSections` entries in `IMAGE_SECTION_HEADER[]`. For each section, computes:
+
+    ```c
+    uint32_t dest = image_base + section->VirtualAddress;
+    uint32_t src  = (uint32_t)file_buffer + section->PointerToRawData;
+    uint32_t size = section->SizeOfRawData;
+    ```
+
+    If `size > 0` and `dest != src`, copies the raw data to the virtual address with `memcpy`. This requires that the target physical address is identity-mapped.
+
+    Prints: `PE: Loading <N> sections to ImageBase 0x<addr>...`
+  </Step>
+  <Step title="Entry point call">
+    Computes `entry_point = image_base + AddressOfEntryPoint`, casts it to a `void (*)(void)` function pointer, and calls it directly. Prints before the call:
+
+    ```text
+    PE: Jmp to EntryPoint: 0x<addr>
+    ```
+
+    After the entry point returns, prints:
+
+    ```text
+    PE: Application exited.
+    ```
+  </Step>
+</Steps>
+
+---
+
+## `run` Command Flow
+
+The `run` shell command in `cmd.c` wires NKBuild and the PE loader together:
+
+```c
+} else if (strcmp(cmd, "run") == 0) {
+    void    *buf  = nkbuild_get_exe_buffer();
+    uint32_t size = nkbuild_get_exe_size();
+    if (buf && size > 0)
+        pe_load_and_run(buf, size);
+    else
+        kprintf("No executable built yet. Run 'build' first.\n");
+}
+```
+
+<Steps>
+  <Step title="Get buffer">
+    `nkbuild_get_exe_buffer()` returns the pointer to the static `g_exe_buffer`, or `NULL` if no binary has been finalized.
+  </Step>
+  <Step title="Get size">
+    `nkbuild_get_exe_size()` returns `g_exe_size`, which is `0` until `done` has been processed.
+  </Step>
+  <Step title="Guard check">
+    If either value indicates no built binary, prints `No executable built yet. Run 'build' first.` and returns without calling the loader.
+  </Step>
+  <Step title="Execute">
+    Passes both values to `pe_load_and_run`, which performs full PE validation and then calls the entry point.
+  </Step>
+</Steps>
