@@ -1,5 +1,5 @@
 ---
-title: "NKLegacy Shell: NT-Style Command Reference"
+title: "NKLegacy Shell Commands: Complete NT-Style Reference"
 sidebarTitle: "Commands"
 description: "Complete reference for all commands in NKLegacy's built-in NT-style shell: DIR, CD, MKDIR, ECHO, TYPE, CLS, VER, HELP, BUILD, and RUN."
 ---
@@ -226,6 +226,10 @@ Iterates over `file->data[0..file->size-1]`, calling `vga_putchar` and `serial_p
 
 Enters NKBuild mode to interactively construct a minimal PE32 binary in memory. The shell prompt changes to `nkbuild> ` (light red) and each input line is forwarded to `nkbuild_process_line()`. Type `done` to finalize the binary and return to the normal shell prompt.
 
+<Note>
+  `build` is intercepted by the `cmd_run` loop **before** `cmd_execute` is called. If `build` somehow reaches `cmd_execute` directly (e.g., called programmatically), it prints a diagnostic message and does nothing useful — NKBuild mode is only entered through the main loop.
+</Note>
+
 See [NKBuild](/shell/nkbuild) for the full directive reference and workflow.
 
 ```text
@@ -274,7 +278,7 @@ See [PE Loader](/shell/pe-loader) for details on how the binary is validated and
 
 | Message | Trigger |
 |---------|---------|
-| `'<cmd>' is not recognized as an internal or external command, operable program or batch file.` | The input does not match any built-in command. |
+| `'<cmd>' is not recognized as an internal or external command,`<br/>`operable program or batch file.` | The input does not match any built-in command. |
 | `The system cannot find the path specified.` | `cd <name>` — target does not exist or is not a directory. |
 | `The system cannot find the file specified.` | `type <file>` — target does not exist or is a directory. |
 | `A subdirectory or file <name> already exists.` | `mkdir` / `md` — a node with that name already exists. |

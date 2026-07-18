@@ -1,7 +1,7 @@
 ---
-title: "GDT and IDT: Protected Mode Descriptor Tables"
+title: "Kernel GDT and IDT: Protected Mode Descriptor Tables"
 sidebarTitle: "GDT & IDT"
-description: "How NKLegacy sets up the x86 Global Descriptor Table and Interrupt Descriptor Table, including segment selectors, entry structures, and initialization functions."
+description: "NKLegacy sets up the GDT and IDT during early boot, defining x86 segment selectors, entry structures, and the interrupt vector dispatch framework."
 ---
 
 NKLegacy initializes two fundamental x86 protected mode data structures — the Global Descriptor Table (GDT) and the Interrupt Descriptor Table (IDT) — during the early kernel boot phase. The GDT tells the CPU how the address space is segmented and at what privilege level, while the IDT maps each of the 256 interrupt vectors to an assembly stub that transfers control into the kernel's C interrupt dispatcher.
@@ -172,7 +172,6 @@ The example below mirrors the real keyboard driver (`keyboard.c`) and shows the 
 ```c
 #include "arch/i386/idt.h"
 #include "arch/i386/io.h"
-#include "driver/pic/pic.h"
 
 /* IRQ1 fires on every PS/2 keypress */
 static void my_keyboard_handler(registers_t *regs) {
@@ -181,9 +180,6 @@ static void my_keyboard_handler(registers_t *regs) {
     /* Read scancode from PS/2 data port */
     uint8_t scancode = inb(0x60);
     /* ... process scancode ... */
-
-    /* Acknowledge the interrupt to the PIC */
-    pic_send_eoi(1);  /* IRQ line 1 = keyboard */
 }
 
 void my_keyboard_init(void) {

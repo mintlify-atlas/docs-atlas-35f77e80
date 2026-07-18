@@ -1,7 +1,7 @@
 ---
 title: "kprintf: Formatted Kernel Output to VGA and Serial"
 sidebarTitle: "kprintf"
-description: "Reference for kprintf, the NKLegacy formatted print function. Documents all supported format specifiers and how output is mirrored to both VGA and COM1 serial."
+description: "Reference for kprintf, NKLegacy's kernel formatted print function, covering every supported specifier and its dual VGA and COM1 serial output."
 ---
 
 `kprintf` is NKLegacy's kernel-level formatted print function. Every call outputs simultaneously to both the VGA text console and the COM1 serial port (`0x3F8`), making it the primary debug channel during kernel development. There is no buffering or locking — output is written character-by-character in the order it is produced.

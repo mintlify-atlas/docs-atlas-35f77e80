@@ -1,7 +1,7 @@
 ---
-title: "Kernel Panic and Blue Screen of Death in NKLegacy"
+title: "NKLegacy Kernel Panic and Blue Screen of Death (BSOD)"
 sidebarTitle: "Panic & BSOD"
-description: "How NKLegacy handles unrecoverable kernel errors: kernel_panic halts with a message, and bsod switches the VGA to blue and displays an NT-style error screen."
+description: "How NKLegacy handles fatal errors: kernel_panic logs to serial and triggers bsod, which sets VGA color 0x1F and displays an NT-style stop screen."
 ---
 
 NKLegacy provides two error-halt mechanisms — `kernel_panic` for generic fatal errors and `bsod` for an NT-style Blue Screen of Death — both of which permanently halt the CPU. Neither function returns. They are the correct response to any condition from which the kernel cannot safely recover, such as a corrupted data structure, a failed hardware initialization, or an unhandled exception.

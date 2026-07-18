@@ -1,5 +1,5 @@
 ---
-title: "NKLegacy x86 Memory Map and Linker Layout"
+title: "NKLegacy x86 Memory Map, Linker Sections, and Boot Stacks"
 sidebarTitle: "Memory Layout"
 description: "The physical memory map used by NKLegacy: bootloader load addresses, kernel placement at 1 MB, linker script sections, and the NKFS data pool."
 ---
@@ -15,8 +15,8 @@ Address Range          Size       Contents
 0x00400 – 0x004FF      256 B      BIOS Data Area (BDA)
 0x07C00 – 0x07DFF      512 B      Stage 1 MBR (NKBootman, loaded by BIOS)
 0x07E00 – 0x0FDFF      8 KB       Stage 2 loader (NKBootman, loaded by Stage 1)
-0x08000 – 0x08FFF    (grows ↓)    Real-mode stack (SP starts at 0x7C00 in Stage 1)
-0x09000                           Stack top for Multiboot / Stage 2 32-bit entry
+0x07C00             (grows ↓)    Real-mode stack (SP initialized to 0x7C00 in Stage 1)
+0x90000                           Temporary protected-mode stack (Stage 2, after entering protected mode)
 0x10000 – 0x1FFFF     64 KB       Temporary kernel load buffer (Stage 2 only)
 0x0A0000 – 0x0BFFFF  128 KB       Video RAM (VGA, EGA, etc.)
 0x0B8000                          VGA text-mode framebuffer (80×25, 16-colour)

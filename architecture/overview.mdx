@@ -1,5 +1,5 @@
 ---
-title: "NKLegacy Architecture: Boot to Shell"
+title: "NKLegacy Architecture: Five-Phase Boot and Init Pipeline"
 sidebarTitle: "Overview"
 description: "A top-down view of NKLegacy's architecture: how NKBootman hands off to the kernel, how hardware is initialized, and how the shell loop runs."
 ---
@@ -78,7 +78,7 @@ NKLegacy follows a classic two-stage bare-metal boot pipeline. A custom MBR boot
 </Steps>
 
 <Note>
-  The kernel binary is always placed at **physical address 0x100000 (1 MB)**. NKBootman Stage 2 loads the flat binary from disk sector 17 into a temporary buffer at 0x10000, then uses `rep movsd` to relocate it to 0x100000 before jumping there. When GRUB loads the ELF instead, it reads the `PT_LOAD` segment whose load address is 0x100000 (as declared in `linker.ld`) and maps it directly — no relocation step is needed.
+  The kernel binary is always placed at **physical address 0x100000 (1 MB)**. NKBootman Stage 2 reads 128 sectors (64 KB) starting at CHS sector 18 (disk image offset 17) into a temporary buffer at 0x10000, then uses `rep movsd` to relocate them to 0x100000 before jumping there. When GRUB loads the ELF instead, it reads the `PT_LOAD` segment whose load address is 0x100000 (as declared in `linker.ld`) and maps it directly — no relocation step is needed.
 </Note>
 
 ## Explore Further

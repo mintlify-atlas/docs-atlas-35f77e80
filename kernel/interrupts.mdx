@@ -1,13 +1,13 @@
 ---
-title: "Interrupt Handling: ISR Stubs and IRQ Dispatch"
+title: "x86 Interrupt Handling: ISR Stubs and IRQ Dispatch"
 sidebarTitle: "Interrupts"
-description: "How NKLegacy handles x86 exceptions and hardware IRQs through assembly ISR stubs, the 8259 PIC, and C-level interrupt dispatch via idt_register_handler."
+description: "How NKLegacy handles x86 exceptions and hardware IRQs through assembly ISR stubs, the remapped 8259 PIC, and C-level dispatch via idt_register_handler."
 ---
 
 NKLegacy handles all 256 x86 interrupt vectors through assembly ISR stubs in `isr.asm` that save CPU state, call a C dispatch function, then restore state and return with `iret`. Hardware IRQs additionally require the 8259 Programmable Interrupt Controller (PIC) to be remapped so that IRQ lines 0–15 do not collide with the reserved CPU exception vectors 0–31.
 
 <Warning>
-Always call `pic_send_eoi(irq)` at the end of every hardware IRQ handler (vectors 32–47). Failing to send an End-of-Interrupt signal masks all further interrupts on that IRQ line — the system will appear to stop receiving timer ticks, keyboard input, or other hardware events.
+NKLegacy's `irq_handler` in `idt.c` sends the End-of-Interrupt (EOI) signal to the 8259 PIC automatically, **before** invoking your registered callback. Do **not** call `pic_send_eoi` from inside a handler registered via `idt_register_handler` — the EOI has already been sent. Sending it a second time can trigger spurious interrupts or cause the PIC to miss subsequent IRQs on that line.
 </Warning>
 
 ## Assembly ISR Stubs
@@ -18,7 +18,7 @@ Two NASM macros generate the per-vector entry points that the IDT points to. The
 
 ### `ISR_NOERRCODE` — exceptions without an error code
 
-Used for exceptions where the CPU does **not** automatically push an error code (e.g., Division By Zero, Invalid Opcode, Page Fault is the exception — see table below). The macro pushes a dummy `0` so the stack layout matches `registers_t` exactly.
+Used for exceptions where the CPU does **not** automatically push an error code (e.g., Division By Zero, Invalid Opcode, Machine Check). The macro pushes a dummy `0` so the stack layout matches `registers_t` exactly.
 
 ```asm
 %macro ISR_NOERRCODE 1
@@ -63,12 +63,23 @@ isr%1:
 | 12 | Stack-Segment Fault | `ISR_ERRCODE` |
 | 13 | General Protection Fault | `ISR_ERRCODE` |
 | 14 | Page Fault | `ISR_ERRCODE` |
+| 15 | Reserved | `ISR_NOERRCODE` |
 | 16 | x87 Floating-Point Exception | `ISR_NOERRCODE` |
 | 17 | Alignment Check | `ISR_ERRCODE` |
 | 18 | Machine Check | `ISR_NOERRCODE` |
 | 19 | SIMD Floating-Point Exception | `ISR_NOERRCODE` |
 | 20 | Virtualization Exception | `ISR_NOERRCODE` |
+| 21 | Reserved | `ISR_NOERRCODE` |
+| 22 | Reserved | `ISR_NOERRCODE` |
+| 23 | Reserved | `ISR_NOERRCODE` |
+| 24 | Reserved | `ISR_NOERRCODE` |
+| 25 | Reserved | `ISR_NOERRCODE` |
+| 26 | Reserved | `ISR_NOERRCODE` |
+| 27 | Reserved | `ISR_NOERRCODE` |
+| 28 | Reserved | `ISR_NOERRCODE` |
+| 29 | Reserved | `ISR_NOERRCODE` |
 | 30 | Security Exception | `ISR_NOERRCODE` |
+| 31 | Reserved | `ISR_NOERRCODE` |
 
 ### Common ISR stub
 
@@ -246,16 +257,12 @@ The steps below show the complete pattern for adding a new hardware IRQ handler.
     ```c
     #include "arch/i386/idt.h"
     #include "arch/i386/io.h"
-    #include "driver/pic/pic.h"
 
     static void my_irq_handler(registers_t *regs) {
         (void)regs;  /* suppress unused warning if regs not needed */
 
         /* --- Handle the hardware event here --- */
         uint8_t data = inb(0x60);   /* example: read from PS/2 data port */
-
-        /* Always send EOI so the PIC allows future interrupts on this line */
-        pic_send_eoi(1);   /* pass the IRQ line number, not the vector */
     }
     ```
   </Step>
@@ -278,5 +285,5 @@ The steps below show the complete pattern for adding a new hardware IRQ handler.
 </Steps>
 
 <Info>
-The C `irq_handler` function in `idt.c` already sends PIC EOI automatically for vectors 32–47. However, it is also good practice to call `pic_send_eoi` explicitly from your own handler if you need precise control over when EOI is issued (e.g., before re-enabling interrupts inside the handler).
+The C `irq_handler` function in `idt.c` sends PIC EOI automatically for all vectors 32–47 **before** invoking the registered callback. Do **not** call `pic_send_eoi` from inside your handler — doing so would send EOI twice, which can cause spurious or missed interrupts on some hardware. Call `pic_send_eoi` only from contexts that bypass `irq_handler` entirely.
 </Info>

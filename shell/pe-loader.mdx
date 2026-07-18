@@ -1,7 +1,7 @@
 ---
-title: "PE Loader: Executing PE32 Binaries in the Kernel"
+title: "PE Loader: Running PE32 Binaries Inside the Kernel"
 sidebarTitle: "PE Loader"
-description: "How NKLegacy's PE loader validates and executes PE32 binaries in-kernel: MZ/PE signature checks, section mapping, and entry point invocation via pe_load_and_run."
+description: "NKLegacy PE loader: MZ/PE signature checks, machine type validation, section mapping, and direct entry point invocation via pe_load_and_run."
 ---
 
 NKLegacy includes a minimal PE32 loader that can validate and execute PE32 executables directly inside the kernel address space. It is used by the `run` shell command to execute binaries produced by [NKBuild](/shell/nkbuild). The loader is implemented in `ntoskrnl/exe/pe.c` and its types and public API are declared in `ntoskrnl/exe/pe.h`.

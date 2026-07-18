@@ -1,7 +1,7 @@
 ---
-title: "NKBuild: Interactive Minimal PE Binary Builder"
+title: "NKBuild: NKLegacy Interactive Minimal PE32 Binary Builder"
 sidebarTitle: "NKBuild"
-description: "How NKBuild constructs a minimal PE32 executable interactively from the NKLegacy shell, and how to use nkbuild_start, nkbuild_process_line, and nkbuild_get_exe_buffer."
+description: "Interactive PE32 builder for NKLegacy's shell: nkbuild_start, nkbuild_process_line, nkbuild_get_exe_buffer, and supported assembly directives."
 ---
 
 NKBuild is NKLegacy's built-in minimal PE32 binary builder. It runs interactively inside the shell — type `build` to enter NKBuild mode, provide build directives line by line, then type `done` to finalize the binary in memory. The resulting PE32 image can immediately be executed with the `run` command via the [PE Loader](/shell/pe-loader).

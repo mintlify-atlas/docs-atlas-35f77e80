@@ -1,7 +1,7 @@
 ---
-title: "NKLegacy Source Tree and Module Layout"
+title: "NKLegacy Source Tree: Directories, Modules, and Build System"
 sidebarTitle: "Project Structure"
-description: "A guide to every directory and source file in NKLegacy, explaining what each module does and how the components fit together."
+description: "Walk through every directory in NKLegacy, from the NKBootman bootloader and kernel modules to the NKFS filesystem and Makefile build targets."
 ---
 
 NKLegacy is organised as a single repository whose two top-level concerns — the **NKBootman bootloader** and the **ntoskrnl kernel** — live in cleanly separated directories. A single `Makefile` at the root ties everything together, driving the NASM assembler, the GCC C compiler in freestanding mode, and the GNU linker to produce either a GRUB-bootable ELF image or a raw floppy disk image. All build output lands under `build/` and is never committed to the repository.
@@ -268,7 +268,10 @@ The Makefile defines four phony top-level targets and handles all dependency tra
 
 | Target | Description |
 |--------|-------------|
-| `make all` | Builds kernel ELF + NKBootman binaries + floppy image |
+| `make all` | Builds kernel ELF + NKBootman binaries + floppy image (runs `kernel`, `bootloader`, `image`) |
+| `make kernel` | Compiles all C and ASM sources and links `build/nklegacy.elf` |
+| `make bootloader` | Assembles `build/boot/mbr.bin` (Stage 1) and `build/boot/stage2.bin` (Stage 2) |
+| `make image` | Creates the 1.44 MB floppy image `build/nklegacy.img` |
 | `make iso` | Builds the GRUB rescue ISO (`build/nklegacy.iso`) |
 | `make run` | Builds ISO then launches `qemu-system-i386` with `-serial stdio` |
 | `make run-bootman` | Builds floppy image then boots it in QEMU via `-fda` |

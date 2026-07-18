@@ -1,5 +1,5 @@
 ---
-title: "VGA Text Mode Driver: 80×25 Console Output"
+title: "VGA Text-Mode Driver: 80×25 Console Output for NKLegacy"
 sidebarTitle: "VGA"
 description: "Reference for NKLegacy's VGA text-mode driver: console initialization, character output, color attributes, hardware cursor control, and screen scrolling."
 ---
@@ -39,10 +39,10 @@ Writes a single character to the screen at the current cursor position, then adv
 |---|---|---|
 | Newline | `\n` | Moves cursor to column 0 of the next row |
 | Carriage return | `\r` | Moves cursor to column 0 of the current row |
-| Backspace | `\b` | Moves cursor one column left and overwrites the cell with a space |
-| Tab | `\t` | Advances cursor to the next 8-column boundary (`cursor_x = (cursor_x + 8) & ~7`) |
+| Backspace | `\b` | If `cursor_x > 0`, moves cursor one column left and overwrites that cell with a space |
+| Tab | `\t` | Advances cursor to the next 8-column boundary (`cursor_x = (cursor_x + 8) & ~7`); if the result is ≥ `VGA_WIDTH`, wraps to column 0 of the next row |
 
-After writing any character, if `cursor_x` reaches `VGA_WIDTH` (80) the cursor wraps to the start of the next row. If `cursor_y` reaches `VGA_HEIGHT` (25), the driver calls the internal `vga_scroll()` function before updating the hardware cursor.
+For printable characters, if `cursor_x` reaches `VGA_WIDTH` (80) after the write, the cursor wraps to column 0 of the next row. After every character (printable or control), if `cursor_y` reaches `VGA_HEIGHT` (25), the driver calls the internal `vga_scroll()` function to shift all rows up one line before updating the hardware cursor.
 
 ```c
 vga_putchar('H');
@@ -110,7 +110,7 @@ vga_set_cursor(0, 0);    /* home the cursor after vga_clear */
 
 ## Color Attribute Reference
 
-The table below lists every color attribute used in `kmain.c`. All entries have a black background (nibble `0`), except the BSOD color.
+The table below lists every color attribute used in `kmain.c`. All entries have a black background (nibble `0`).
 
 | Value | Foreground | Background | Usage in kmain.c |
 |---|---|---|---|
@@ -120,8 +120,6 @@ The table below lists every color attribute used in `kmain.c`. All entries have 
 | `0x0A` | Light green | Black | `[OK]` status labels |
 | `0x07` | Light gray | Black | Subsystem status descriptions |
 | `0x0E` | Yellow | Black | Shell prompt (`nklegacy>`) |
-| `0x0C` | Light red | Black | `nkbuild>` prompt in build mode |
-| `0x1F` | White | Blue | Blue Screen of Death |
 
 ## Scrolling
 
@@ -141,38 +139,35 @@ When `cursor_y` reaches `VGA_HEIGHT` (25) after a `vga_putchar` call, the intern
 
 ## Usage Example
 
-The following snippet reproduces the NT-style boot banner printed by `kmain.c`:
+The following snippet shows the VGA color-sequencing pattern used by `kmain.c` to produce the NT-style boot banner:
 
 ```c
 #include "driver/vga/vga.h"
 
-/* Called early in kmain, after serial_init */
-void print_boot_banner(void) {
-    /* Clear screen with white-on-black default */
-    vga_set_color(0x0F);
-    vga_clear();
+/* Phase 1: clear screen with white-on-black default */
+vga_set_color(0x0F);
+vga_clear();
 
-    /* Kernel name in light cyan */
-    vga_set_color(0x0B);
-    vga_print("NKLegacy Kernel ");
+/* Phase 4: print boot header */
+vga_set_color(0x0B);   /* light cyan */
+vga_print("NKLegacy Kernel ");
+vga_set_color(0x0F);   /* white */
+vga_print("v0.1.0 [Build: " __DATE__ " " __TIME__ "]\n");
 
-    /* Version in white */
-    vga_set_color(0x0F);
-    vga_print("v0.1.0\n");
+vga_set_color(0x08);   /* dark gray */
+vga_print("Copyright (c) 2026 William Beauregard. MIT License.\n");
+vga_print("Windows NT-inspired kernel operating system.\n\n");
 
-    /* Copyright in dark gray */
-    vga_set_color(0x08);
-    vga_print("Copyright (c) 2026 William Beauregard. MIT License.\n\n");
+/* [OK] lines: light green label, light gray description */
+vga_set_color(0x0A);
+vga_print("  [OK] ");
+vga_set_color(0x07);
+vga_print("Global Descriptor Table\n");
 
-    /* [OK] line: green label, gray description */
-    vga_set_color(0x0A);
-    vga_print("  [OK] ");
-    vga_set_color(0x07);
-    vga_print("PS/2 Keyboard Driver\n");
+/* ... repeated for IDT, PIC, PIT, PS/2 Keyboard, Serial ... */
 
-    /* Yellow shell prompt */
-    vga_set_color(0x0E);
-    vga_print("nklegacy> ");
-    vga_set_color(0x0F);
-}
+/* Shell prompt in yellow */
+vga_set_color(0x0E);
+vga_print("nklegacy> ");
+vga_set_color(0x0F);
 ```

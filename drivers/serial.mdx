@@ -1,7 +1,7 @@
 ---
-title: "Serial Debug Driver: COM1 Output at 115200 Baud"
+title: "NKLegacy Serial Debug Driver: COM1 Output at 115200 Baud"
 sidebarTitle: "Serial"
-description: "Reference for NKLegacy's serial driver: initialize COM1 or COM2, write characters and strings, read input, and monitor kernel output from the host via QEMU -serial stdio."
+description: "Reference for NKLegacy's serial driver: initialize COM1 or COM2, transmit characters and strings, receive input, and debug via QEMU -serial stdio."
 ---
 
 NKLegacy provides a serial driver for early-boot and ongoing debug output over COM1 (`0x3F8`) at 115200 baud 8-N-1. `kmain.c` calls `serial_init(COM1)` as the very first hardware operation — before VGA is cleared, before GDT/IDT are loaded — making COM1 the earliest observable debug channel. All kernel boot messages are written to COM1 via `serial_print`, and the shell loop polls `serial_getchar(COM1)` so commands can be typed over the serial connection as well as the PS/2 keyboard.
@@ -49,7 +49,7 @@ serial_print(COM1, "NKLegacy: Serial debug initialized\n");
 
 ### `void serial_putchar(uint16_t port, char c)`
 
-Polls the Line Status Register (`port + 5`) until bit 5 (Transmitter Holding Register Empty) is set, then writes the byte to the transmit register (`port + 0`). When `serial_print` encounters a `\n` it automatically prepends a `\r` so terminals display correctly.
+Polls the Line Status Register (`port + 5`) until bit 5 (Transmitter Holding Register Empty) is set, then writes the byte to the transmit register (`port + 0`). The function sends exactly the byte it is given with no translation — CR+LF conversion is handled by `serial_print`, not here.
 
 ```c
 serial_putchar(COM1, 'A');
@@ -137,11 +137,25 @@ for (;;) {
         c = serial_getchar(COM1);
 
     if (c) {
-        /* echo and buffer the character */
-        vga_putchar(c);
-        cmd_buf[cmd_i++] = c;
+        if (c == '\n' || c == '\r') {
+            vga_putchar('\n');
+            cmd_buf[cmd_i] = '\0';
+            break;
+        } else if (c == '\b') {
+            if (cmd_i > 0) {
+                cmd_i--;
+                vga_putchar('\b');
+                vga_putchar(' ');
+                vga_putchar('\b');
+            }
+        } else {
+            if (cmd_i < 127) {
+                cmd_buf[cmd_i++] = c;
+                vga_putchar(c);
+            }
+        }
     } else {
-        __asm__ volatile("pause");   /* reduce CPU spin */
+        __asm__ volatile("pause");
     }
 }
 ```

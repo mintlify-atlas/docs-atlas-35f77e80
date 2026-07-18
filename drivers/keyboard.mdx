@@ -1,7 +1,7 @@
 ---
-title: "PS/2 Keyboard Driver: Scancode Set 1 Input"
+title: "PS/2 Keyboard Driver: Scancode Set 1 Input for NKLegacy"
 sidebarTitle: "Keyboard"
-description: "Reference for NKLegacy's PS/2 keyboard driver: IRQ1 scancode handling, scancode-to-ASCII translation, shift key support, and reading input via keyboard_getchar."
+description: "Reference for NKLegacy's PS/2 keyboard driver: IRQ1 scancode handling, ASCII translation, shift key support, and polling input via keyboard_getchar."
 ---
 
 NKLegacy implements a PS/2 keyboard driver that handles IRQ 1 (INT `0x21`), reads scancodes from port `0x60`, translates them using a Scancode Set 1 lookup table, and stores the resulting ASCII characters in a 256-byte circular buffer for consumption by the shell. The driver is interrupt-driven: every keypress fires the `keyboard_callback` ISR, which translates and buffers the character without any polling overhead in the main loop.

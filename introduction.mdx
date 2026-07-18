@@ -1,7 +1,7 @@
 ---
-title: "NKLegacy: A Windows NT-inspired x86 OS Kernel"
+title: "NKLegacy: Windows NT-inspired Bare-Metal x86 Kernel"
 sidebarTitle: "Introduction"
-description: "NKLegacy is a bare-metal x86 kernel built from scratch in C and assembly, inspired by Windows NT, with a custom bootloader, hardware drivers, and an interactive shell."
+description: "NKLegacy is a bare-metal x86 kernel written in C and assembly, inspired by Windows NT, with a custom bootloader, hardware drivers, and an NT-style shell."
 ---
 
 NKLegacy is a bare-metal x86 (i386) operating system kernel written from scratch in C and x86 assembly, drawing direct inspiration from the architecture of Windows NT. The project demonstrates every layer of a real kernel — from a hand-written two-stage bootloader that transitions the CPU from real mode to 32-bit protected mode, through CPU descriptor tables, hardware interrupt handling, and device drivers, all the way up to an NT-style interactive shell backed by an in-memory filesystem. Whether you are studying OS internals, building your own kernel, or simply curious how the machine boots and runs, NKLegacy provides a compact and fully readable reference implementation, versioned at **v0.1.0** (codename **"Legacy"**).

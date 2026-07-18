@@ -1,7 +1,7 @@
 ---
-title: "Kernel Initialization Sequence in NKLegacy"
+title: "NKLegacy Kernel Init: Five-Phase Startup in kmain.c"
 sidebarTitle: "Kernel Init"
-description: "A detailed walkthrough of kmain.c's five-phase initialization: serial/VGA setup, GDT/IDT loading, PIC/PIT/keyboard init, and the transition to the shell loop."
+description: "A detailed walkthrough of kmain.c's five-phase init: serial/VGA setup, GDT/IDT loading, PIC/PIT/keyboard bringup, and the transition to the shell loop."
 ---
 
 `kmain()` is the C entry point called by the Multiboot assembly stub in `ntoskrnl/arch/i386/boot.asm`. By the time it runs, the CPU is in 32-bit protected mode, a 16 KB kernel stack has been set up at `stack_top`, and the flat memory model is active. `kmain` then executes five sequential initialization phases before handing off to the shell loop — none of these phases allocates heap memory or calls any standard library function; every subsystem uses static storage.
